@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-overlay-ocr"
+version = "0.1.0"
+description = "Local OCR and editable PowerPoint overlays for technical images"
+requires-python = ">=3.11,<3.13"
+dynamic = ["dependencies"]
+
+[project.scripts]
+smart-overlay-ocr = "smart_overlay.__main__:main"
+
+[tool.setuptools.dynamic]
+dependencies = {file = "requirements.txt"}
+
+[tool.setuptools.packages.find]
+include = ["smart_overlay*"]
+
+[tool.setuptools.package-data]
+smart_overlay = ["export/*.cjs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
