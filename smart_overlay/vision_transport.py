@@ -81,7 +81,7 @@ class ChatStream:
 
 
 def post_json(url, api_key, body, *, connect_timeout, request_timeout,
-              progress, cancelled, label):
+              progress, cancelled, label, observe=None):
     async def run():
         started = time.monotonic()
         phase = "подключение к API"
@@ -221,5 +221,7 @@ def post_json(url, api_key, body, *, connect_timeout, request_timeout,
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if observe is not None:
+                observe(dict(metadata))
 
     return asyncio.run(run())

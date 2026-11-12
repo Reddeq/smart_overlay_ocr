@@ -25,11 +25,21 @@ def main():
                         help="Export unreviewed objects with a warning; structural validation still applies")
     replay = sub.add_parser("replay-vl", help="Replay a saved VL validation failure locally, without OCR/API")
     replay.add_argument("diagnostic", type=Path)
+    from .diagnose_vl import add_parser as add_diagnostic_parser
+    add_diagnostic_parser(sub)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if not args.command:
         from .app import run_app
         return run_app()
+    if args.command == "diagnose-vl":
+        from .diagnose_vl import main as diagnose
+        try:
+            return diagnose(args)
+        except (ValueError, OSError) as exc:
+            from .vision import validation_detail
+            print("VL diagnostics: " + validation_detail(exc, os.environ.get("OPENROUTER_API_KEY", "")))
+            return 2
     if args.command == "replay-vl":
         from .vision import validation_detail
         from .vision_diagnostics import replay as replay_diagnostic
