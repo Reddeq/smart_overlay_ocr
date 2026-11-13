@@ -9,7 +9,8 @@ from PIL import Image
 import pytest
 
 from smart_overlay.diagnose_vl import (add_parser, audit_images, build_cases, case_plan, evaluate,
-                                      main, partition, run_case, synthetic, wire)
+                                      main, partition, run_case, synthetic, wire, comparison_baseline,
+                                      GROUPING_EXAMPLES_PROMPT, holdout)
 from smart_overlay.input import save_project
 from smart_overlay.settings import Settings
 from smart_overlay.vision import analysis_images, analysis_prompt, request_payload, Analysis
@@ -224,3 +225,131 @@ def test_input_file_cannot_be_overwritten_by_report(tmp_path):
     with pytest.raises(ValueError, match="differ"):
         main(args("--project", str(path), "--output", str(path)))
     assert path.read_bytes() == before
+
+
+def test_examples_change_only_user_prompt_and_preserve_inputs_parameters_and_truth():
+    baseline = cases("--tests", "B,C", "--model", "test/model")
+    experiments = cases("--tests", "B,C", "--grouping-prompt", "examples")
+    for old, new in zip(baseline, experiments):
+        assert old.project == new.project and old.expected == new.expected
+        assert old.payload["messages"][0] == new.payload["messages"][0]
+        restored = copy.deepcopy(new.payload)
+        restored["messages"][1]["content"][0]["text"] = old.payload["messages"][1]["content"][0]["text"]
+        assert restored == old.payload
+        assert case_plan(old)["request_sha256"] == new.baseline_request_sha256
+        prompt = new.payload["messages"][1]["content"][0]["text"]
+        assert "MAXIMUM" in prompt and "OUTLET VALVE" in prompt
+        assert "{{OCR_DATA}}" not in prompt and '"id_5"' in prompt
+        assert prompt.startswith("You are a layout analysis assistant")
+        assert new.prompt_variant == "examples"
+    assert experiments[1].payload["messages"][1]["content"][1:] == baseline[1].payload["messages"][1]["content"][1:]
+    assert "MAIN" not in GROUPING_EXAMPLES_PROMPT and "CONTROL" not in GROUPING_EXAMPLES_PROMPT
+
+
+@pytest.mark.parametrize("selected", ["A", "F", "B,C,E", "B,B"])
+def test_examples_cannot_launch_other_tests_or_more_than_two_requests(selected):
+    with pytest.raises(ValueError):
+        cases("--tests", selected, "--grouping-prompt", "examples")
+
+
+def saved_baseline(path):
+    records = []
+    for c in cases("--tests", "B,C"):
+        text = '{"merges":[["id_1","id_2","id_3"],["id_4","id_5"]]}'
+        records.append({**case_plan(c), **evaluate(c, response(text)), "provider": "Parasail"})
+    path.write_text(json.dumps({"executed": True, "endpoint": Settings().endpoint, "results": records}), "utf-8")
+
+
+def test_comparison_checks_baseline_hash_before_api_and_scores_real_grouping(tmp_path):
+    path = tmp_path/"old.json"
+    saved_baseline(path)
+    new = cases("--tests", "B,C", "--grouping-prompt", "examples", "--provider", "parasail")
+    rows = comparison_baseline(path, new, Settings())
+    assert all(r["same_baseline_request"] and r["previous_content_valid"] is False for r in rows)
+    # An identical confidence-free merge is correct, while merging the two independent labels is not.
+    for c in new:
+        assert evaluate(c, response('{"merges":[["id_1","id_2","id_3"]]}'))["content_valid"] is True
+        assert evaluate(c, response(rows[0]["previous_full_text"]))["content_valid"] is False
+    record = json.loads(path.read_text("utf-8"))
+    record["results"][0]["request_sha256"] = "changed"
+    path.write_text(json.dumps(record), "utf-8")
+    with pytest.raises(ValueError, match="hash changed"):
+        comparison_baseline(path, new, Settings())
+
+
+def test_examples_runner_makes_exactly_two_calls_without_follow_up_or_retry(tmp_path, monkeypatch):
+    baseline = tmp_path/"old.json"
+    saved_baseline(baseline)
+    output = tmp_path/"new.json"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    calls = []
+    def post(*a, **kw):
+        calls.append(json.loads(a[2]))
+        kw["observe"]({"http_status": 200, "received_bytes": 100})
+        return response('{"merges":[["id_1","id_2","id_3"]]}', provider="Parasail")
+    monkeypatch.setattr("smart_overlay.diagnose_vl.post_json", post)
+    assert main(args("--tests", "B,C", "--grouping-prompt", "examples", "--model", "test/model",
+                     "--provider", "parasail", "--compare-with", str(baseline), "--execute",
+                     "--confirm-requests", "2", "--max-requests", "2", "--max-total-output-tokens", "2048",
+                     "--output", str(output))) == 0
+    assert len(calls) == 2
+    result = json.loads(output.read_text("utf-8"))
+    assert len(result["results"]) == 2 and len(result["comparison"]) == 2
+    assert all(r["content_valid"] is True for r in result["results"])
+    assert "Previous real response" in output.with_suffix(".md").read_text("utf-8")
+    assert "separate user permission" in output.with_suffix(".md").read_text("utf-8")
+
+
+def test_examples_timeout_is_not_retried(tmp_path, monkeypatch):
+    from smart_overlay.vision_transport import RequestTimedOut
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    calls = []
+    def post(*a, **kw):
+        calls.append(True)
+        raise RequestTimedOut("timeout", {"_transport": {"http_status": None, "received_bytes": 0}})
+    monkeypatch.setattr("smart_overlay.diagnose_vl.post_json", post)
+    assert main(args("--tests", "B,C", "--grouping-prompt", "examples", "--execute", "--confirm-requests", "2",
+                     "--max-requests", "2", "--max-total-output-tokens", "2048", "--output", str(tmp_path/"new.json"))) == 2
+    assert len(calls) == 2  # One per selected case, including a pre-POST timeout; no retry.
+
+
+def test_holdout_is_different_from_both_prompt_examples_and_original_test():
+    original, _ = synthetic()
+    project, truth = holdout()
+    assert len(project.fragments) == 6 and project.source.sha256 != original.source.sha256
+    assert truth == [["h_1", "h_2", "h_3"], ["h_4", "h_5"], ["h_6"]]
+    assert all(f.text not in GROUPING_EXAMPLES_PROMPT for f in project.fragments)
+    case = cases("--tests", "H", "--grouping-prompt", "examples")[0]
+    assert case.expected == truth and case_plan(case)["images"] == 1
+    assert case.baseline_request_sha256 is None
+    reply = '{"merges":[["h_1","h_2","h_3"],["h_4","h_5"]]}'
+    assert evaluate(case, response(reply))["content_valid"] is True
+    assert evaluate(case, response('{"merges":[["h_4","h_5","h_6"]]}'))["content_valid"] is False
+
+
+@pytest.mark.parametrize("options", [("--tests", "H"),
+                                     ("--tests", "B,C,H", "--grouping-prompt", "examples")])
+def test_holdout_cannot_join_the_two_request_experiment(options):
+    with pytest.raises(ValueError, match="separate"):
+        cases(*options)
+
+
+def test_singleton_contract_violation_is_not_a_semantic_grouping_error():
+    case = cases("--tests", "H", "--grouping-prompt", "examples")[0]
+    text = '{"merges":[["h_1","h_2","h_3"],["h_4","h_5"],["h_6"]]}'
+    record = evaluate(case, response(text))
+    assert record["full_text"] == text
+    assert record["grouping_valid"] is True and record["merge_contract_valid"] is False
+    assert record["content_valid"] is False and record["classification"] == "incorrect_grouping"
+
+
+@pytest.mark.parametrize("text,grouping_valid,contract_valid", [
+    ('{"merges":[["id_1","id_2","id_3"]]}', True, True),
+    ('{"merges":[["id_1","id_2","id_3"],["id_4","id_5"]]}', False, True),
+    ('{"merges":[["id_1","id_2","id_3"],["id_3"]]}', False, False),
+    ('{"merges":[["id_1","id_2","id_3"],["unknown"]]}', False, False),
+])
+def test_separate_grouping_and_contract_scores(text, grouping_valid, contract_valid):
+    record = evaluate(cases("--tests", "B", "--grouping-prompt", "examples")[0], response(text))
+    assert record["grouping_valid"] is grouping_valid
+    assert record["merge_contract_valid"] is contract_valid

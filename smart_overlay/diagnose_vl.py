@@ -22,6 +22,63 @@ from .vision_diagnostics import sanitized
 from .vision_transport import post_json, RequestTimedOut, ResponseReadError
 
 
+GROUPING_EXAMPLES_PROMPT = """You are a layout analysis assistant for technical drawings.
+
+Your task is to identify OCR text fragments that belong to the SAME logical text label and should become ONE editable PowerPoint text box.
+
+Use text meaning, bounding box coordinates, alignment, and the supplied image when available.
+
+RULES:
+1. Merge consecutive lines of one multi-line label.
+2. A multi-line label may contain both words and numbers or technical codes.
+3. Do NOT merge separate labels merely because they are close together.
+4. Do NOT merge text from different columns, diagram components, or table cells.
+5. Text fragments on the same horizontal row but at different positions are normally independent.
+6. Preserve the reading order of merged lines.
+7. Each OCR ID may appear in at most one merge.
+8. Return ONLY merges containing two or more IDs.
+9. Unmentioned IDs remain separate. Never repeat them as singleton groups.
+10. If uncertain, leave fragments separate rather than making an unsupported merge.
+
+EXAMPLE 1 — CORRECT MERGE:
+
+OCR:
+a1: "MAXIMUM"         bbox=[20, 10, 120, 25]
+a2: "OPERATING"       bbox=[20, 38, 140, 25]
+a3: "PRESSURE"        bbox=[20, 66, 130, 25]
+
+These three vertically aligned lines form one label.
+
+Output:
+{"merges":[["a1","a2","a3"]]}
+
+EXAMPLE 2 — DO NOT MERGE:
+
+OCR:
+b1: "INLET VALVE"     bbox=[20, 10, 145, 25]
+b2: "OUTLET VALVE"    bbox=[280, 10, 155, 25]
+
+These are independent labels in different positions.
+Their similar meaning and shared horizontal alignment do NOT make them one label.
+
+Output:
+{"merges":[]}
+
+NOW ANALYZE THE ACTUAL OCR DATA.
+
+Identify logical multi-line labels.
+Use the same rules as in the examples.
+
+Return ONLY valid JSON in this exact format:
+{"merges":[["id_1","id_2"]]}
+
+If no merges are justified, return:
+{"merges":[]}
+
+ACTUAL OCR DATA:
+{{OCR_DATA}}"""
+
+
 class Status(Model):
     status: Literal["ok"]
     value: Literal[123]
@@ -51,6 +108,8 @@ class Case:
     response_model: type[Model]
     project: Project | None = None
     expected: list[list[str]] | None = None
+    prompt_variant: str = "baseline"
+    baseline_request_sha256: str | None = None
 
 
 def synthetic(count=5):
@@ -89,6 +148,31 @@ def synthetic(count=5):
     return Project(source=source, fragments=fragments, objects=objects), expected
 
 
+def holdout():
+    """Unseen labels, IDs and layout; only selected explicitly after user permission."""
+    image = Image.new("RGB", (760, 260), "white")
+    draw, font = ImageDraw.Draw(image), ImageFont.load_default(size=22)
+    fragments, objects = [], []
+    lines = [("AUXILIARY", 420, 20), ("POWER", 420, 52), ("UNIT 27", 420, 84),
+             ("SENSOR", 40, 150), ("PT-408", 40, 182), ("FUSE F9", 420, 182)]
+    for index, (text, x, y) in enumerate(lines, 1):
+        left, top, right, bottom = draw.textbbox((x, y), text, font=font)
+        box = Box(x=left, y=top, w=right-left, h=bottom-top)
+        identifier = f"h_{index}"
+        fragments.append(Fragment(id=identifier, text=text, bbox=box, confidence=1,
+                         polygon=[(left, top), (right, top), (right, bottom), (left, bottom)]))
+        objects.append(Text(id=f"text_{identifier}", bbox=box, text=text, ocr_ids=[identifier]))
+        draw.text((x, y), text, font=font, fill="black")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    raw = buffer.getvalue()
+    encoded = base64.b64encode(raw).decode()
+    source = Source(filename="holdout.png", width=image.width, height=image.height, mode="RGB",
+                    sha256=hashlib.sha256(raw).hexdigest(), original_b64=encoded,
+                    raster_b64=encoded, raster_mime="image/png")
+    return Project(source=source, fragments=fragments, objects=objects), [["h_1", "h_2", "h_3"], ["h_4", "h_5"], ["h_6"]]
+
+
 def simple_payload(settings, prompt, images, model, format_name):
     payload = {"model": settings.model, "temperature": 0, "stream": False,
                "max_tokens": settings.max_output_tokens,
@@ -124,15 +208,19 @@ def grouping_case(name, settings, count=5, *, images=False, format_name="json_ob
     prompt = ("Group stacked lines belonging to ONE logical label. Preserve reading order. "
               "Do not merge independent labels in separate columns, even if they share a row. "
               + task + " Data: " + json.dumps(packet, ensure_ascii=False, separators=(",", ":")))
-    parts = ([image_part(source_image(project))] if name == "C" else analysis_images(project, settings)) if images else []
+    parts = ([image_part(source_image(project))] if name in {"C", "H"} else analysis_images(project, settings)) if images else []
     return Case(name, simple_payload(settings, prompt, parts, model, format_name), model, project, expected)
 
 
 def build_cases(args, settings):
     selected = args.tests.split(",")
-    allowed = {"A", "B", "C", "V", "D", "E", "F", "X", "F-project", "X-project"}
+    allowed = {"A", "B", "C", "V", "D", "E", "F", "X", "H", "F-project", "X-project"}
     if len(set(selected)) != len(selected) or set(selected)-allowed:
-        raise ValueError("Unknown or duplicate test; choose A,B,C,V,D,E,F,X,F-project,X-project")
+        raise ValueError("Unknown or duplicate test; choose A,B,C,V,D,E,F,X,H,F-project,X-project")
+    if "H" in selected and (selected != ["H"] or args.grouping_prompt != "examples"):
+        raise ValueError("H is a separate examples-only experiment requiring new user permission")
+    if args.grouping_prompt == "examples" and not (set(selected) <= {"B", "C"} or selected == ["H"]):
+        raise ValueError("The examples experiment supports only B/C, or a separately permitted H")
     if any(n.endswith("-project") for n in selected) and args.project is None:
         raise ValueError("F-project/X-project require --project PATH.socr.json")
     cases = []
@@ -163,11 +251,22 @@ def build_cases(args, settings):
             payload = request_payload(settings, analysis_prompt(project), analysis_images(project, settings), Analysis)
             payload["stream"] = False
             cases.append(Case(name, payload, Analysis, project, expected))
+        elif name == "H":
+            project, expected = holdout()
+            cases.append(grouping_case(name, settings, images=True, project=project, expected=expected))
         elif name == "X-project":
             cases.append(grouping_case(name, settings, mode="prototype", images=True,
                                        project=open_project(args.project)))
         else:
             cases.append(grouping_case(name, settings, images=name == "C", mode="prototype" if name == "X" else "delta"))
+    if args.grouping_prompt == "examples":
+        for case in cases:
+            # Hash the unchanged baseline before adding provider pinning, matching the old report.
+            if case.name != "H":
+                case.baseline_request_sha256 = hashlib.sha256(wire(case)).hexdigest()
+            case.prompt_variant = "examples"
+            case.payload["messages"][1]["content"][0]["text"] = GROUPING_EXAMPLES_PROMPT.replace(
+                "{{OCR_DATA}}", json.dumps(analysis_packet(case.project), ensure_ascii=False, separators=(",", ":")))
     for case in cases:
         if args.provider:
             case.payload.setdefault("provider", {}).update(order=[args.provider], allow_fallbacks=False)
@@ -204,7 +303,8 @@ def wire(case):
 
 def case_plan(case):
     images = audit_images(case.payload)
-    return {"test": case.name, "model": case.payload["model"],
+    return {"test": case.name, "model": case.payload["model"], "prompt_variant": case.prompt_variant,
+            "baseline_request_sha256": case.baseline_request_sha256,
             "response_format": case.payload.get("response_format", {}).get("type", "none"),
             "provider_requested": case.payload.get("provider", {}).get("order"),
             "fragments": len(case.project.fragments) if case.project else 0,
@@ -269,6 +369,27 @@ def content_check(case, result):
     return ({tuple(g) for g in groups} == {tuple(g) for g in case.expected}), "exact_partition_and_line_order"
 
 
+def merge_assessment(case, result):
+    """Score semantic partition separately from the strict merges contract; never repair the reply."""
+    ids = [f.id for f in case.project.fragments if f.id not in case.project.ignored]
+    try:
+        partition(ids, result.merges)
+        contract_valid = True
+    except ValueError:
+        contract_valid = False
+    used = [i for merge in result.merges for i in merge]
+    if (any(not merge for merge in result.merges) or len(used) != len(set(used))
+            or set(used)-set(ids)):
+        grouping_valid = False
+    elif case.expected is None:
+        grouping_valid = None
+    else:
+        # A singleton is a no-op for grouping quality, but remains an invalid merge.
+        groups = partition(ids, [merge for merge in result.merges if len(merge) >= 2])
+        grouping_valid = {tuple(g) for g in groups} == {tuple(g) for g in case.expected}
+    return {"grouping_valid": grouping_valid, "merge_contract_valid": contract_valid}
+
+
 def evaluate(case, raw):
     record = {"json_valid": False, "schema_valid": False, "content_valid": False,
               "full_text": None, "classification": "api_envelope_error"}
@@ -306,6 +427,8 @@ def evaluate(case, raw):
     except ValidationError:
         record["classification"] = "valid_json_empty" if not meaningful(data) else "schema_error"
         return record
+    if isinstance(result, Merges):
+        record.update(merge_assessment(case, result))
     if not meaningful(data):
         record["classification"] = "valid_json_empty"
         return record
@@ -356,6 +479,9 @@ def run_case(case, settings, api_key):
 def add_parser(sub):
     parser = sub.add_parser("diagnose-vl", help="Plan or explicitly execute bounded VL experiments (no OCR/export)")
     parser.add_argument("--tests", default="A,B,C,V,D,F,X")
+    parser.add_argument("--grouping-prompt", choices=["baseline", "examples"], default="baseline",
+                        help="Diagnostic-only B/C prompt with examples; H is a separately permitted holdout")
+    parser.add_argument("--compare-with", type=Path, help="Saved baseline report; verify identical B/C inputs before sending")
     parser.add_argument("--formats", default="none,json_object", help="D formats; json_schema is opt-in and requires support")
     parser.add_argument("--sizes", default="5,10,20,40,80")
     parser.add_argument("--scale-mode", choices=["full", "delta", "both"], default="both")
@@ -374,6 +500,31 @@ def add_parser(sub):
     return parser
 
 
+def comparison_baseline(path, cases, settings):
+    baseline = json.loads(path.read_text("utf-8"))
+    if baseline.get("executed") is not True or baseline.get("endpoint") != settings.endpoint:
+        raise ValueError("Comparison requires a live baseline from the same endpoint")
+    rows = []
+    for case in cases:
+        previous = [r for r in baseline.get("results", []) if r.get("test") == case.name]
+        if len(previous) != 1 or case.prompt_variant != "examples":
+            raise ValueError("Comparison requires one saved baseline result for each examples B/C case")
+        old = previous[0]
+        if old.get("request_sha256") != case.baseline_request_sha256:
+            raise ValueError("Baseline request hash changed: OCR, coordinates, image or API parameters differ")
+        if old.get("provider") != "Parasail" or case.payload.get("provider") != {"order": ["parasail"], "allow_fallbacks": False}:
+            raise ValueError("Comparison requires the previous Parasail result and --provider parasail without fallback")
+        if not isinstance(old.get("full_text"), str):
+            raise ValueError("Baseline model text is missing")
+        # Recheck the real saved response against the same known partition, not confidence or a canned answer.
+        assessed = evaluate(case, {"choices": [{"finish_reason": old.get("finish_reason"),
+                                                "message": {"content": old["full_text"]}}]})
+        rows.append({"test": case.name, "same_baseline_request": True,
+                     "previous_full_text": old["full_text"], "previous_classification": assessed["classification"],
+                     "previous_content_valid": assessed["content_valid"]})
+    return rows
+
+
 def write_report(path, report, api_key):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sanitized(report, api_key), ensure_ascii=False, indent=2), "utf-8")
@@ -387,19 +538,37 @@ def write_report(path, report, api_key):
                   f"{usage.get('prompt_tokens')}/{usage.get('completion_tokens')}", usage.get("cost"),
                   r.get("seconds"), r["classification"]]
         rows.append("| " + " | ".join(str(v).replace("|", "\\|") for v in values) + " |")
+    if any("grouping_valid" in r for r in report["results"]):
+        rows.extend(["", "| Test | Semantic grouping correct | Strict merges contract valid |",
+                     "|---|---|---|"])
+        for r in report["results"]:
+            rows.append(f"| {r['test']} | {r.get('grouping_valid')} | {r.get('merge_contract_valid')} |")
+        rows.extend(["", "A singleton entry can preserve the correct partition but violates the merges contract.",
+                     "Responses are retained verbatim; the semantic score does not repair or accept invalid replies."])
+    if report.get("comparison"):
+        rows.extend(["", "## Prompt comparison", "", "| Test | Previous real response | New real response | Previous / new result |",
+                     "|---|---|---|---|"])
+        for comparison in report["comparison"]:
+            current = next((r for r in report["results"] if r["test"] == comparison["test"]), {})
+            values = [comparison["test"], comparison["previous_full_text"], current.get("full_text", "Not executed"),
+                      comparison["previous_classification"]+" / "+current.get("classification", "not_executed")]
+            rows.append("| " + " | ".join(str(v).replace("|", "\\|").replace("\n", " ") for v in values) + " |")
+        rows.extend(["", "OCR, images, system message and generation settings match the verified baseline hashes.",
+                     "The user prompt changed, and the previous provider is explicitly pinned without fallback.",
+                     "No generalization requests are included. They require separate user permission."])
     rows.extend(["", "Full model text and validation results are in the JSON report. No requests/images/keys are logged.",
                  "Unknown ground truth is reported as unverified, not successful grouping.",
                  "A plan without live calls establishes no model capability. No automatic retries are made."])
     if report.get("stopped"):
         rows.extend(["", "Stopped: " + report["stopped"]])
-    path.with_suffix(".md").write_text("\n".join(rows)+"\n", "utf-8")
+    path.with_suffix(".md").write_text(sanitized("\n".join(rows)+"\n", api_key), "utf-8")
 
 
 def main(args):
     if args.output.suffix.lower() != ".json":
         raise ValueError("--output must end in .json (a companion .md report is also written)")
     destinations = {args.output.resolve(), args.output.with_suffix(".md").resolve()}
-    inputs = [p for p in (args.project, args.settings) if p is not None]
+    inputs = [p for p in (args.project, args.settings, args.compare_with) if p is not None]
     if any(p.resolve() in destinations for p in inputs):
         raise ValueError("Report paths must differ from input project/settings")
     settings = Settings.model_validate_json(args.settings.read_text("utf-8")) if args.settings else load_settings()
@@ -421,6 +590,8 @@ def main(args):
     report = {"version": 1, "executed": False, "endpoint": settings.endpoint,
               "planned_requests": len(cases), "max_total_output_tokens": output_budget,
               "plan": plans, "results": []}
+    if args.compare_with:
+        report["comparison"] = comparison_baseline(args.compare_with, cases, settings)
     if not args.execute:
         write_report(args.output, report, "")
         print("Plan only. To send requests, use --execute --confirm-requests " + str(len(cases)))
