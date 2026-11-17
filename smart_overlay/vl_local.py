@@ -293,22 +293,61 @@ def parse_page(source: Project, settings, page: dict):
     return result
 
 
-def save_diagnostics(directory, page, project):
-    """Explicit opt-in; diagnostic JSON contains source text. Never commit it."""
+def diagnostic_summary(page, project=None, *, error=None):
+    """Capture model labels and rejected boxes without requiring successful PPTX."""
+    blocks = page.get("parsing_res_list")
+    blocks = blocks if isinstance(blocks, list) else []
+    labels = Counter(str(block.get("block_label", "<unknown>")).lower()
+                     for block in blocks if isinstance(block, dict))
+    summary = {
+        "version": VERSION,
+        "status": "failed" if error else "converted",
+        "layout_block_count": len(blocks),
+        "block_labels": dict(labels),
+        "regions": [
+            {"index": i,
+             "label": str(block.get("block_label", "<unknown>")).lower(),
+             "bbox": _native_json(block.get("block_bbox")),
+             "has_content": bool(str(block.get("block_content") or "").strip())}
+            for i, block in enumerate(blocks) if isinstance(block, dict)
+        ],
+    }
+    if project is not None:
+        summary["conversion"] = _native_json(project.raw.get("local_vl", {}))
+    if error is not None:
+        summary["error"] = str(error)
+    return summary
+
+
+def save_diagnostics(directory, page, project=None, *, source=None, error=None):
+    """Store actual VL output even on failure; contains confidential local text."""
     directory = Path(directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "paddle-vl-result.json").write_text(
         json.dumps(_native_json(page), ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = diagnostic_summary(page, project, error=error)
     (directory / "paddle-vl-summary.json").write_text(
-        json.dumps(project.raw["local_vl"], ensure_ascii=False, indent=2), encoding="utf-8")
-    preview = source_image(project)
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    context = project if project is not None else source
+    if context is None:
+        return
+    preview = source_image(context)
     draw = ImageDraw.Draw(preview)
-    for obj in project.objects:
-        b = obj.bbox
-        draw.rectangle((b.x, b.y, b.right, b.bottom),
-                       outline="#0088ff" if isinstance(obj, Table) else "#ff6600", width=2)
+    if project is not None:
+        objects = [(obj.bbox, "#0088ff" if isinstance(obj, Table) else "#ff6600")
+                   for obj in project.objects]
+    else:
+        objects = []
+        for region in summary["regions"]:
+            try:
+                box = block_box(region["bbox"], preview.width, preview.height)
+            except (ValueError, TypeError):
+                continue
+            color = "#ff3366" if region["label"] in NON_TEXT_LABELS else "#ff6600"
+            objects.append((box, color))
+    for box, color in objects:
+        draw.rectangle((box.x, box.y, box.right, box.bottom), outline=color, width=2)
     preview.save(directory / "paddle-vl-boxes.png")
-
 
 def local_vl_ocr(source: Project, settings, *, device="cpu", pipeline_factory=None,
                  diagnostics_dir=None, progress=lambda _: None, check=lambda: None):
