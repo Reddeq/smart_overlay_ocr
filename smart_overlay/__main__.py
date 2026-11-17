@@ -26,6 +26,12 @@ def main():
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
     one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
     one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
+    one.add_argument("--ocr-engine", choices=["smart", "vl_local"], default=None,
+                     help="Use classic Smart OCR or independent, fully local PaddleOCR-VL 1.6")
+    one.add_argument("--vl-device", choices=["cpu", "gpu:0"], default=None,
+                     help="PaddleOCR-VL runtime device; CPU is the safe default")
+    one.add_argument("--vl-diagnostics", type=Path,
+                     help="Save confidential local VL parsing JSON and a box overlay in this directory")
     sub.add_parser("editor", help="Open the legacy correction editor")
     export = sub.add_parser("export", help="Export an already reviewed project without OCR")
     export.add_argument("project", type=Path)
@@ -46,6 +52,8 @@ def main():
         return run_app()
     if args.command == "convert":
         from .one_click import convert_drawing
+        if args.smart and args.ocr_engine == "vl_local":
+            parser.error("Local PaddleOCR-VL and --smart (cloud) are mutually exclusive")
         if args.smart and not args.consent_api:
             parser.error("Cloud processing requires --consent-api for this drawing")
         settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
@@ -57,7 +65,9 @@ def main():
                 "ocr_languages": codes})
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-                                 consent=args.smart and args.consent_api, proxy=args.proxy, progress=print)
+                                 consent=args.smart and args.consent_api, proxy=args.proxy,
+                                 ocr_engine=args.ocr_engine, vl_device=args.vl_device,
+                                 vl_diagnostics=args.vl_diagnostics, progress=print)
         print(result.pptx)
         for warning in result.warnings:
             logging.warning(warning)
