@@ -25,11 +25,13 @@ py -3.12 -m venv .venv-vl
 
 Нужно сохранить имеющийся Node.js для генерации PPTX — через PATH или переменную SMART_OVERLAY_NODE.
 
-Запуск GUI из тестового окружения:
+Запуск GUI из тестового окружения (можно использовать короткий скрипт):
 
 ~~~powershell
-.\.venv-vl\Scripts\python.exe -m smart_overlay
+.\run-vl.ps1
 ~~~
+
+Или напрямую: .\.venv-vl\Scripts\python.exe -m smart_overlay
 
 Запуск CLI на существующем файле:
 
@@ -59,7 +61,7 @@ py -3.12 -m venv .venv-vl
 
 Диагностика GUI сохраняется в каталоге:
 
-    %LOCALAPPDATA%\SmartOverlayOCR\diagnostics\paddle-vl\<имя чертежа>\
+    %LOCALAPPDATA%\SmartOverlayOCR\diagnostics\paddle-vl\<имя чертежа>-<ID запуска>\
 
 Внутри:
 - paddle-vl-result.json — оригинальный ответ модели с текстом;
