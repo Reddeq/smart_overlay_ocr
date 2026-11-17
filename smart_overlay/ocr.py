@@ -41,11 +41,15 @@ class PaddleEngine:
         self._ocr = None
         self._tables = None
         self._last_ocr = None
+        self.last_language_audit = {}
+        self._line_recognizers = {}
 
     def recognize(self, image: Image.Image, offset=(0, 0), *, detection=None) -> tuple[list[Fragment], list[dict]]:
         from paddleocr import PaddleOCR
+        from .languages import MODELS, families, recognize_lines, resolve
+        lang, additional = resolve(self.settings)
         if self._ocr is None:
-            self._ocr = PaddleOCR(lang=self.settings.language, ocr_version=self.settings.ocr_version,
+            self._ocr = PaddleOCR(lang=lang, ocr_version=self.settings.ocr_version,
                                   use_doc_orientation_classify=False, use_doc_unwarping=False,
                                   use_textline_orientation=True, device="cpu",
                                   text_rec_score_thresh=0.0)
@@ -58,6 +62,21 @@ class PaddleEngine:
         raw = [result_dict(r) for r in results]
         fragments = [f for page in raw for f in fragments_from_result(page, offset,
                      "region" if offset != (0, 0) else "paddle")]
+        self.last_language_audit = {"active": [lang], "uncertain_ids": [], "warnings": []}
+        if additional and fragments:
+            # Reuse one detection result; recognition-only models see measured crops.
+            def model_factory(model_name):
+                if model_name not in self._line_recognizers:
+                    from paddleocr import TextRecognition
+                    self._line_recognizers[model_name] = TextRecognition(model_name=model_name, device="cpu")
+                return self._line_recognizers[model_name]
+            group_for_language = next((group for group, (code, _) in MODELS.items() if code == lang), "en")
+            fragments, self.last_language_audit = recognize_lines(
+                image, fragments, group_for_language, additional,
+                auto=self.settings.ocr_language_mode == "auto",
+                model_factory=model_factory)
+            # Raw Paddle result stays intact for TableRecognitionPipelineV2.
+            # Attach only compact final-language metadata for diagnostics.
         return fragments, raw
 
     def tables(self, image: Image.Image) -> list[dict]:
