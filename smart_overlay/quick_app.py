@@ -221,6 +221,24 @@ class QuickWindow(QMainWindow):
         chooser.addWidget(self.run_button)
         layout.addLayout(chooser)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Способ распознавания:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Smart OCR · обычный", "smart")
+        self.mode_combo.addItem("PaddleOCR-VL 1.6 · локально (эксперимент)", "vl_local")
+        self.mode_combo.setCurrentIndex(0 if self.settings.ocr_engine == "smart" else 1)
+        self.mode_combo.currentIndexChanged.connect(self.mode_changed)
+        mode_row.addWidget(self.mode_combo)
+        self.device_combo = QComboBox()
+        self.device_combo.addItem("CPU", "cpu")
+        self.device_combo.addItem("GPU", "gpu:0")
+        self.device_combo.setCurrentIndex(0 if self.settings.vl_device == "cpu" else 1)
+        self.device_combo.setToolTip("GPU может потребовать более 6 ГБ видеопамяти. CPU медленнее.")
+        self.device_combo.currentIndexChanged.connect(self.device_changed)
+        mode_row.addWidget(self.device_combo)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
         language_row = QHBoxLayout()
         language_row.addWidget(QLabel("Языки OCR:"))
         self.language_button = QPushButton()
@@ -229,6 +247,7 @@ class QuickWindow(QMainWindow):
         language_row.addStretch(1)
         layout.addLayout(language_row)
         self.refresh_languages()
+        self.mode_changed()
 
         self.preview = Preview()
         self.preview.show_formatting = True
@@ -263,6 +282,27 @@ class QuickWindow(QMainWindow):
         actions.addWidget(self.review)
         layout.addLayout(actions)
         self.statusBar().showMessage("Готово к работе")
+
+    def mode_changed(self, *_):
+        local = self.mode_combo.currentData() == "vl_local"
+        self.settings.ocr_engine = "vl_local" if local else "smart"
+        self.language_button.setEnabled(not local and self.worker is None)
+        self.device_combo.setEnabled(local and self.worker is None)
+        self.device_combo.setVisible(local)
+        self.statusBar().showMessage(
+            "VL полностью локальный: при первом запуске загрузятся веса; "
+            "результат требует проверки" if local else "Smart OCR готов")
+        self._save_mode()
+
+    def device_changed(self, *_):
+        self.settings.vl_device = self.device_combo.currentData()
+        self._save_mode()
+
+    def _save_mode(self):
+        try:
+            save_settings(self.settings)
+        except OSError:
+            self.statusBar().showMessage("Не удалось сохранить настройки запуска")
 
     def refresh_languages(self):
         if self.settings.ocr_language_mode != "manual":
@@ -328,7 +368,8 @@ class QuickWindow(QMainWindow):
         if not self.path or self.worker:
             return
         consent = False
-        if self.cloud_enabled:
+        local_vl = self.mode_combo.currentData() == "vl_local"
+        if self.cloud_enabled and not local_vl:
             answer = QMessageBox.question(
                 self, "Облачное распознавание",
                 "Отправить части этого чертежа и распознанный текст в OpenRouter через настроенный VPN?\n"
@@ -341,12 +382,18 @@ class QuickWindow(QMainWindow):
             consent = answer == QMessageBox.StandardButton.Yes
 
         source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
+        engine = "vl_local" if local_vl else "smart"
+        device = self.device_combo.currentData()
+        diagnostics = (data_dir() / "diagnostics" / "paddle-vl" / self.path.stem
+                       if local_vl else None)
         self.set_busy(True)
         self.summary.setText("")
         self.status_text.setText("Начинаю распознавание…")
         self.worker = ConvertWorker(
             lambda report, stop: convert_drawing(source, settings=settings, api_key=key,
                                                  consent=consent, proxy=proxy,
+                                                 ocr_engine=engine, vl_device=device,
+                                                 vl_diagnostics=diagnostics,
                                                  progress=report, cancelled=stop), self)
         self.worker.progress.connect(self.status_text.setText)
         self.worker.completed.connect(self.done)
@@ -356,7 +403,8 @@ class QuickWindow(QMainWindow):
         self.worker.start()
 
     def set_busy(self, busy):
-        for widget in (self.pick, self.run_button, self.config, self.language_button):
+        for widget in (self.pick, self.run_button, self.config,
+                       self.language_button, self.mode_combo, self.device_combo):
             widget.setEnabled(not busy)
         self.progress.setVisible(busy)
         self.cancel.setVisible(busy)
@@ -396,6 +444,7 @@ class QuickWindow(QMainWindow):
         self.worker = None
         self.set_busy(False)
         self.cancel.setEnabled(True)
+        self.mode_changed()
         if worker:
             worker.deleteLater()
 
