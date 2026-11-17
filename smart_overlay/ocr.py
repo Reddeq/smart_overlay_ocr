@@ -68,6 +68,7 @@ class PaddleEngine:
         self._last_ocr = None
         self.last_language_audit = {}
         self._line_recognizers = {}
+        self.progress = lambda _: None
 
     def recognize(self, image: Image.Image, offset=(0, 0), *, detection=None) -> tuple[list[Fragment], list[dict]]:
         from paddleocr import PaddleOCR
@@ -104,7 +105,7 @@ class PaddleEngine:
             fragments, self.last_language_audit = recognize_lines(
                 image, fragments, group_for_language, additional,
                 auto=self.settings.ocr_language_mode == "auto",
-                model_factory=model_factory, offset=offset)
+                model_factory=model_factory, offset=offset, progress=self.progress)
             # A blank provisional detection isn't a translated label. Retain
             # only positively recognized text to avoid masking graphics.
             fragments = [f for f in fragments if f.text.strip()]
