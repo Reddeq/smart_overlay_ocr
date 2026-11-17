@@ -203,6 +203,7 @@ def recognize_lines(image, fragments, primary_group, requested_groups, *,
             # Never make this model appear to have succeeded.
     chosen = []
     uncertain = []
+    used = {}
     for fragment, readings in zip(fragments, options):
         best, conflict = choose(readings)
         if auto and conflict and fragment.text.strip():
@@ -213,6 +214,10 @@ def recognize_lines(image, fragments, primary_group, requested_groups, *,
         updated = fragment.model_copy(deep=True)
         updated.text, updated.confidence = best.text, best.confidence
         chosen.append(updated)
-        if conflict:
+        used[best.group] = used.get(best.group, 0) + 1
+        if conflict or (auto and best.group != primary_group):
+            # Auto classification has no independent visual script classifier.
+            # A successful alternate script is still a suggestion to verify.
             uncertain.append(updated.id)
-    return chosen, {"active": active, "uncertain_ids": uncertain, "warnings": warnings}
+    return chosen, {"active": active, "selected_counts": used,
+                    "uncertain_ids": uncertain, "warnings": warnings}
