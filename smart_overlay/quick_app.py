@@ -4,6 +4,7 @@ The legacy object editor is kept as an optional correction tool, not the default
 workflow. Advanced experiments and diagnostics remain CLI-only.
 """
 import os
+import json
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal, Qt, QUrl
@@ -11,11 +12,12 @@ from PySide6.QtGui import QAction, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QVBoxLayout, QWidget, QGridLayout, QRadioButton,
 )
 
 from .app import Preview
 from .input import load_image
+from .languages import LANGUAGES
 from .one_click import OneClickResult, ProcessingCancelled, convert_drawing
 from .settings import data_dir, load_settings, save_settings
 
@@ -47,9 +49,6 @@ class ConnectionDialog(QDialog):
         self.resize(520, 200)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.language = QLineEdit(settings.language)
-        self.language.setPlaceholderText("ru или en")
-        form.addRow("Язык чертежа", self.language)
         self.cloud = QCheckBox("Улучшать группировку и таблицы через OpenRouter")
         self.cloud.setChecked(enabled)
         form.addRow("", self.cloud)
@@ -73,8 +72,93 @@ class ConnectionDialog(QDialog):
         if self.cloud.isChecked() and not self.key.text().strip():
             QMessageBox.warning(self, "OpenRouter", "Для облачного распознавания укажите API-ключ или отключите облачный режим.")
             return
-        if not self.language.text().strip():
-            QMessageBox.warning(self, "Язык", "Укажите язык OCR, например ru или en.")
+        super().accept()
+
+
+class LanguageDialog(QDialog):
+    """One compact chooser for automatic routing, presets and manual combinations."""
+
+    PRESETS = [
+        ("Русский + английский", ["ru", "en"]),
+        ("Китайский + английский", ["ch", "en"]),
+        ("Японский + английский", ["japan", "en"]),
+        ("Китайский + русский", ["ch", "ru"]),
+    ]
+
+    def __init__(self, mode, languages, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Языки распознавания")
+        self.setMinimumWidth(540)
+        layout = QVBoxLayout(self)
+        self.auto = QRadioButton("Определять автоматически")
+        self.manual = QRadioButton("Указать языки")
+        self.auto.setChecked(mode != "manual")
+        self.manual.setChecked(mode == "manual")
+        layout.addWidget(self.auto)
+        layout.addWidget(self.manual)
+
+        presets = QHBoxLayout()
+        for title, codes in self.PRESETS:
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, choice=codes: self.use_preset(choice))
+            presets.addWidget(button)
+        # Horizontal scroll is avoided; presets wrap into two columns.
+        preset_grid = QGridLayout()
+        while presets.count():
+            item = presets.takeAt(0)
+            preset_grid.addWidget(item.widget(), preset_grid.count() // 2, preset_grid.count() % 2)
+        layout.addLayout(preset_grid)
+
+        self.checks = {}
+        grid = QGridLayout()
+        for i, (code, (title, _)) in enumerate(LANGUAGES.items()):
+            check = QCheckBox(title)
+            check.setChecked(code in languages)
+            check.toggled.connect(self.on_check)
+            self.checks[code] = check
+            grid.addWidget(check, i // 3, i % 3)
+        layout.addLayout(grid)
+        self.hint = QLabel("Автоопределение проверяет несколько письменностей и может работать дольше.")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+        self.auto.toggled.connect(self.sync)
+        self.manual.toggled.connect(self.sync)
+        self.sync()
+
+        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        actions.accepted.connect(self.accept)
+        actions.rejected.connect(self.reject)
+        layout.addWidget(actions)
+
+    def on_check(self):
+        if self.sender().isChecked():
+            self.manual.setChecked(True)
+
+    def use_preset(self, codes):
+        for code, check in self.checks.items():
+            check.blockSignals(True)
+            check.setChecked(code in codes)
+            check.blockSignals(False)
+        self.manual.setChecked(True)
+        self.sync()
+
+    def sync(self):
+        manual = self.manual.isChecked()
+        for check in self.checks.values():
+            check.setEnabled(manual)
+        self.hint.setText(
+            "Ручной набор: будут использованы только указанные семейства OCR-моделей."
+            if manual else "Авто: китайский/японский, английский, кириллица, корейский и арабский. "
+            "Неизвестные письменности могут потребовать ручного выбора.")
+
+    def selected(self):
+        return ("manual" if self.manual.isChecked() else "auto",
+                [code for code, check in self.checks.items() if check.isChecked()])
+
+    def accept(self):
+        mode, selected = self.selected()
+        if mode == "manual" and not selected:
+            QMessageBox.warning(self, "Языки OCR", "Выберите хотя бы один язык.")
             return
         super().accept()
 
@@ -85,9 +169,17 @@ class QuickWindow(QMainWindow):
         self.setWindowTitle("Smart Overlay OCR")
         self.resize(1100, 760)
         self.settings = load_settings()
-        if not (data_dir() / "settings.json").exists():
-            # Default to Russian technical drawings; saved preferences take priority.
-            self.settings.language = "ru"
+        config = data_dir() / "settings.json"
+        explicit_mode = False
+        if config.exists():
+            try:
+                explicit_mode = "ocr_language_mode" in json.loads(config.read_text("utf-8"))
+            except (ValueError, OSError):
+                pass
+        if not explicit_mode or self.settings.ocr_language_mode == "single":
+            # Older settings had only one language. The new quick UI defaults to auto.
+            self.settings.ocr_version = "PP-OCRv5"
+            self.settings.ocr_language_mode = "auto"
         # Automatic background sampling retains more of the source's appearance.
         self.settings.fill_mode = "auto"
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -134,6 +226,15 @@ class QuickWindow(QMainWindow):
         chooser.addWidget(self.run_button)
         layout.addLayout(chooser)
 
+        language_row = QHBoxLayout()
+        language_row.addWidget(QLabel("Языки OCR:"))
+        self.language_button = QPushButton()
+        self.language_button.clicked.connect(self.choose_languages)
+        language_row.addWidget(self.language_button)
+        language_row.addStretch(1)
+        layout.addLayout(language_row)
+        self.refresh_languages()
+
         self.preview = Preview()
         self.preview.show_formatting = True
         layout.addWidget(self.preview, 1)
@@ -168,6 +269,32 @@ class QuickWindow(QMainWindow):
         layout.addLayout(actions)
         self.statusBar().showMessage("Готово к работе")
 
+    def refresh_languages(self):
+        if self.settings.ocr_language_mode != "manual":
+            label = "Автоопределение"
+        else:
+            codes = self.settings.ocr_languages
+            label = " + ".join(LANGUAGES[code][0] for code in codes if code in LANGUAGES)
+        self.language_button.setText(label + "  ▾")
+        self.language_button.setToolTip("Выбрать языковую пару или несколько языков OCR")
+
+    def choose_languages(self):
+        dialog = LanguageDialog(self.settings.ocr_language_mode, self.settings.ocr_languages, self)
+        if not dialog.exec():
+            return
+        mode, codes = dialog.selected()
+        previous = self.settings.model_copy(deep=True)
+        try:
+            self.settings.ocr_version = "PP-OCRv5"
+            self.settings.ocr_language_mode = mode
+            self.settings.ocr_languages = codes
+            self.settings = type(self.settings).model_validate(self.settings.model_dump())
+            save_settings(self.settings)
+        except (ValueError, OSError) as exc:
+            self.settings = previous
+            QMessageBox.warning(self, "Языки OCR", str(exc))
+        self.refresh_languages()
+
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Выбрать чертёж", str(Path.home()),
@@ -196,7 +323,6 @@ class QuickWindow(QMainWindow):
         self.api_key = dialog.key.text().strip()
         self.proxy = dialog.proxy.text().strip()
         self.cloud_enabled = dialog.cloud.isChecked()
-        self.settings.language = dialog.language.text().strip()
         try:
             save_settings(self.settings)
         except (ValueError, OSError) as exc:
@@ -235,7 +361,7 @@ class QuickWindow(QMainWindow):
         self.worker.start()
 
     def set_busy(self, busy):
-        for widget in (self.pick, self.run_button, self.config):
+        for widget in (self.pick, self.run_button, self.config, self.language_button):
             widget.setEnabled(not busy)
         self.progress.setVisible(busy)
         self.cancel.setVisible(busy)
