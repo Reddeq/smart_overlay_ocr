@@ -58,6 +58,8 @@ def main():
             parser.error("Cloud processing requires --consent-api for this drawing")
         settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
                     if args.settings else Settings(ocr_language_mode="auto"))
+        if args.smart and (args.ocr_engine or settings.ocr_engine) == "vl_local":
+            parser.error("Local PaddleOCR-VL cannot be combined with --smart cloud mode")
         if args.languages is not None:
             codes = [c.strip() for c in args.languages.split(",")]
             settings = Settings.model_validate({**settings.model_dump(),
