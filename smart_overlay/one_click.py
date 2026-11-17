@@ -150,12 +150,15 @@ def _smart(project: Project, settings: Settings, api_key: str, proxy: str,
 def convert_drawing(source: str | Path, *, destination: str | Path | None = None,
                     settings: Settings | None = None, api_key: str = "",
                     consent: bool = False, proxy: str | None = None,
+                    ocr_engine: str | None = None, vl_device: str | None = None,
+                    vl_diagnostics: str | Path | None = None,
                     max_requests: int = 24,
                     progress: Callable[[str], None] = lambda _: None,
                     cancelled: Callable[[], bool] = lambda: False) -> OneClickResult:
-    """Create a native PPTX in one operation, even when the optional VL API fails.
+    """Create editable PowerPoint with classic Smart OCR or independent local VL.
 
-    Sending source material to the provider always requires explicit consent.
+    Local VL never contacts OpenRouter, even with a key and consent.
+    Sending data to the provider in Smart mode requires explicit consent.
     No API requests are made without both consent and a key. The complete
     source stays as the bottom PowerPoint raster; editing happens in overlays.
     """
@@ -173,12 +176,26 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         raise ValueError("Слишком вытянутый чертёж для одного слайда PowerPoint")
     # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
     settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
-    progress("Распознавание текста и таблиц (PaddleOCR / OpenCV)")
-    project = local_ocr(source_project, settings, progress=progress)
-    _cancelled(cancelled)
+    engine = ocr_engine or settings.ocr_engine
     grouping_requests = table_requests = 0
+    if engine == "vl_local":
+        from .vl_local import local_vl_ocr
+        project = local_vl_ocr(
+            source_project, settings, device=vl_device or settings.vl_device,
+            diagnostics_dir=vl_diagnostics,
+            progress=progress, check=lambda: _cancelled(cancelled))
+        warnings.append("Экспериментальный локальный PaddleOCR-VL: "
+                        "проверьте геометрию фреймов и структуру таблиц")
+    elif engine == "smart":
+        progress("Распознавание текста и таблиц (PaddleOCR / OpenCV)")
+        project = local_ocr(source_project, settings, progress=progress)
+    else:
+        raise ValueError("Неизвестный движок OCR")
+    _cancelled(cancelled)
 
-    if consent and api_key:
+    if engine == "vl_local":
+        pass  # Never access the network/provider in local VL-only mode.
+    elif consent and api_key:
         progress("Подготовка безопасной VL-группировки")
         try:
             project, grouping_requests, table_requests = _smart(
