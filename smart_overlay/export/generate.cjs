@@ -27,7 +27,7 @@ async function generate(project, output) {
     const b = obj.type === 'text' && obj.frame ? obj.frame : obj.bbox;
     const position = { x: b.x*scale, y: b.y*scale, w: b.w*scale, h: b.h*scale };
     if (obj.type === 'text') {
-      for (const mask of obj.masks || []) {
+      if (!project.inline_text_fill) for (const mask of obj.masks || []) {
         slide.addShape(pptx.ShapeType.rect, {
           x: mask.x*scale, y: mask.y*scale, w: mask.w*scale, h: mask.h*scale,
           fill: { color: hex(obj.style.fill) },
@@ -36,7 +36,7 @@ async function generate(project, output) {
         });
       }
       slide.addText(obj.text, { ...position, ...style(obj.style), rotate: (obj.rotation+360)%360,
-                     fill: { color: hex(obj.style.fill), transparency: 100 },
+                     fill: { color: hex(obj.style.fill), transparency: project.inline_text_fill ? 0 : 100 },
                      line: { color: hex(obj.style.fill), transparency: 100 },
                      paraSpaceAfterPt: 0, charSpacing: 0, wrap: true,
                      objectName: obj.id, isTextBox: true });
