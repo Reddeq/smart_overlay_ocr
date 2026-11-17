@@ -22,6 +22,7 @@ def main():
     one.add_argument("image", type=Path)
     one.add_argument("--output", type=Path)
     one.add_argument("--settings", type=Path)
+    one.add_argument("--languages", help="Comma-separated manual OCR languages, e.g. ru,en or ch,ru")
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
     one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
     one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
@@ -47,7 +48,13 @@ def main():
         from .one_click import convert_drawing
         if args.smart and not args.consent_api:
             parser.error("Cloud processing requires --consent-api for this drawing")
-        settings = Settings.model_validate_json(args.settings.read_text("utf-8")) if args.settings else Settings()
+        settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
+                    if args.settings else Settings(ocr_language_mode="auto"))
+        if args.languages is not None:
+            codes = [c.strip() for c in args.languages.split(",")]
+            settings = Settings.model_validate({**settings.model_dump(),
+                "ocr_version": "PP-OCRv5", "ocr_language_mode": "manual",
+                "ocr_languages": codes})
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
                                  consent=args.smart and args.consent_api, proxy=args.proxy, progress=print)
