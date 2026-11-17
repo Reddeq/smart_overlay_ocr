@@ -5,6 +5,7 @@ workflow. Advanced experiments and diagnostics remain CLI-only.
 """
 import os
 import json
+from uuid import uuid4
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal, Qt, QUrl
@@ -384,7 +385,8 @@ class QuickWindow(QMainWindow):
         source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
         engine = "vl_local" if local_vl else "smart"
         device = self.device_combo.currentData()
-        diagnostics = (data_dir() / "diagnostics" / "paddle-vl" / self.path.stem
+        diagnostics = (data_dir() / "diagnostics" / "paddle-vl"
+                       / (self.path.stem + "-" + uuid4().hex[:8])
                        if local_vl else None)
         self.set_busy(True)
         self.summary.setText("")
