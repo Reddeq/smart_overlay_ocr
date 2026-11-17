@@ -88,7 +88,7 @@ def local_ocr(project: Project, settings: Settings, engine=None, progress=lambda
             for table in result.objects:
                 for cell in table.cells:
                     if cell.ocr_ids:
-                        cell.text = "\\n".join(
+                        cell.text = "\n".join(
                             f.text for f in sorted((by_id[i] for i in cell.ocr_ids),
                                                    key=lambda f: (f.bbox.y, f.bbox.x)))
     except (ImportError, RuntimeError, ValueError, OSError) as exc:
