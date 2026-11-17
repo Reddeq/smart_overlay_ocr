@@ -253,7 +253,9 @@ class QuickWindow(QMainWindow):
         notes = [f"Готово: {result.pptx.name}",
                  f"Объектов: {len(result.project.objects)}; на проверку: {result.needs_review}."]
         if result.warnings:
-            notes.append("Есть замечания — откройте «Исправить результат».")
+            notes.append("Замечания: " + "; ".join(result.warnings[:2]))
+            if len(result.warnings) > 2:
+                notes.append(f"И ещё {len(result.warnings) - 2}.")
         self.summary.setText(" ".join(notes))
         self.status_text.setText("PowerPoint создан")
         self.statusBar().showMessage(str(result.pptx))
