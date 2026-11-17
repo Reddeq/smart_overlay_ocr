@@ -67,6 +67,8 @@ def local_ocr(project: Project, settings: Settings, engine=None, progress=lambda
     result = Project(source=project.source.model_copy(deep=True), settings=settings.model_dump())
     image = source_image(result)
     engine = engine or PaddleEngine(settings)
+    if isinstance(engine, PaddleEngine):
+        engine.progress = progress
     progress("PaddleOCR: распознавание строк")
     result.fragments, raw = engine.recognize(image)
     result.raw["ocr"] = raw
