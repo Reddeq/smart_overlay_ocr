@@ -16,5 +16,7 @@
   "max_font": 36,
   "confidence_threshold": 0.85,
   "inches_per_pixel": 0.006666666666666667,
-  "tile_size": 1600
+  "tile_size": 1600,
+  "ocr_language_mode": "auto",
+  "ocr_languages": []
 }
