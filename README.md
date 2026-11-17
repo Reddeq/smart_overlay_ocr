@@ -47,7 +47,7 @@ npx --yes pnpm@11.25.0 install --frozen-lockfile
 CLI:
 
 ~~~powershell
-.\\.venv-vl\\Scripts\\python.exe -m smart_overlay convert "drawing.png" --ocr-engine vl_local --vl-device cpu --vl-diagnostics ".\\outputs\\paddle-vl"
+.\.venv-vl\Scripts\python.exe -m smart_overlay convert "drawing.png" --ocr-engine vl_local --vl-device cpu --vl-diagnostics ".\\outputs\\paddle-vl"
 ~~~
 
 ## Улучшенное Smart OCR (необязательно)
