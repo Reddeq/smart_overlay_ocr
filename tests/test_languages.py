@@ -179,3 +179,13 @@ def test_unread_primary_detection_can_be_recovered_by_secondary():
         auto=False, model_factory=lambda _: fake)
     assert combined[-1].text == "Питание"
     assert combined[-1].bbox == missing[-1].bbox
+
+
+def test_auto_confusable_script_keeps_original_and_requests_review():
+    project, _ = synthetic()
+    fake = FakeRecognizer([("КОНТРОЛЬ", .85)] * len(project.fragments))
+    result, audit = recognize_lines(
+        Image.new("RGB", (600, 180)), project.fragments,
+        "cjk", ("eslav",), auto=True, model_factory=lambda _: fake)
+    assert result[0].text == project.fragments[0].text
+    assert result[0].id in audit["uncertain_ids"]
