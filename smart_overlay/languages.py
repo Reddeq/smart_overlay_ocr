@@ -124,13 +124,13 @@ def choose(readings, *, ambiguity=.10):
     return best, bool(conflicts)
 
 
-def line_crops(image, fragments):
+def line_crops(image, fragments, offset=(0, 0)):
     """Measured original-image line crops; no new OCR geometry is invented."""
     crops = []
     for frag in fragments:
         b = frag.bbox
-        x0, y0 = max(0, int(b.x) - 2), max(0, int(b.y) - 2)
-        x1, y1 = min(image.width, int(b.right + 3)), min(image.height, int(b.bottom + 3))
+        x0, y0 = max(0, int(b.x - offset[0]) - 2), max(0, int(b.y - offset[1]) - 2)
+        x1, y1 = min(image.width, int(b.right - offset[0] + 3)), min(image.height, int(b.bottom - offset[1] + 3))
         if x1 <= x0 or y1 <= y0:
             raise ValueError("Некорректная область распознанной строки")
         crops.append(np.asarray(image.crop((x0, y0, x1, y1)).convert("RGB")))
@@ -163,7 +163,7 @@ def run_recognizer(model, crops):
 
 
 def recognize_lines(image, fragments, primary_group, requested_groups, *,
-                    auto, model_factory, progress=lambda _: None):
+                    auto, model_factory, offset=(0, 0), progress=lambda _: None):
     """Return corrected fragments and audit data; never change measured geometry.
 
     Auto probes a bounded sample and enables extra script models only on positive
@@ -172,7 +172,7 @@ def recognize_lines(image, fragments, primary_group, requested_groups, *,
     """
     if not fragments or not requested_groups:
         return fragments, {"active": [primary_group], "uncertain_ids": [], "warnings": []}
-    crops = line_crops(image, fragments)
+    crops = line_crops(image, fragments, offset)
     selected = list(requested_groups)
     probes = representative_indices(fragments) if auto else []
     options = [[Reading(primary_group, f.text, f.confidence)] for f in fragments]
