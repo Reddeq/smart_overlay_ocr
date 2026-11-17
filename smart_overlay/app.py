@@ -209,7 +209,8 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(520)
         form = QFormLayout(self)
         self.fields = {}
-        labels = {"language": "Язык OCR (en, ru, …)", "ocr_version": "Профиль OCR",
+        self.original_settings = settings.model_copy(deep=True)
+        labels = {"language": "Язык OCR (старый одиночный режим)", "ocr_version": "Профиль OCR",
                   "endpoint": "API endpoint (без /chat/completions)", "model": "ID мультимодальной модели",
                   "retries": "Повторы запроса", "padding_x": "Запас X, px", "padding_y": "Запас Y, px",
                   "connect_timeout": "Тайм-аут подключения, с", "request_timeout": "Общий лимит попытки API, с",
@@ -218,6 +219,10 @@ class SettingsDialog(QDialog):
                   "max_font": "Максимальный шрифт, pt", "confidence_threshold": "Порог уверенности",
                   "inches_per_pixel": "Дюймов на пиксель (1 / DPI)", "tile_size": "Размер фрагмента VL, px"}
         for name, value in settings.model_dump().items():
+            if name not in labels:
+                # Multilingual language sets are managed by the quick window.
+                # Keep them unchanged when editing legacy advanced settings.
+                continue
             if isinstance(value, bool):
                 field = QCheckBox()
                 field.setChecked(value)
@@ -239,8 +244,11 @@ class SettingsDialog(QDialog):
         form.addRow(controls)
 
     def value(self):
-        return Settings.model_validate({k: w.isChecked() if isinstance(w, QCheckBox) else w.currentText() if isinstance(w, QComboBox) else w.text()
-                                        for k, w in self.fields.items()})
+        values = self.original_settings.model_dump()
+        values.update({k: w.isChecked() if isinstance(w, QCheckBox)
+                       else w.currentText() if isinstance(w, QComboBox) else w.text()
+                       for k, w in self.fields.items()})
+        return Settings.model_validate(values)
 
     def accept(self):
         try:
