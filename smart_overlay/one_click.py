@@ -196,7 +196,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.stem + ".building-" + uuid4().hex[:8] + ".pptx")
     try:
-        export_pptx(project, temporary, settings, allow_unreviewed=True)
+        export_pptx(project, temporary, settings, allow_unreviewed=True, inline_text_fill=True)
         _cancelled(cancelled)
         temporary.replace(output)
     finally:
