@@ -70,6 +70,11 @@ def local_ocr(project: Project, settings: Settings, engine=None, progress=lambda
     progress("PaddleOCR: распознавание строк")
     result.fragments, raw = engine.recognize(image)
     result.raw["ocr"] = raw
+    audit = getattr(engine, "last_language_audit", None)
+    if audit:
+        result.raw["language_routing"] = audit
+        for warning in audit.get("warnings", []):
+            result.messages.append("Языковые модели: " + warning)
     progress("PaddleOCR TableRecognitionPipelineV2: поиск таблиц")
     try:
         table_raw = engine.tables(image)
@@ -90,6 +95,13 @@ def local_ocr(project: Project, settings: Settings, engine=None, progress=lambda
             obj.needs_review = True
             obj.review_notes.append("Проверка таблиц не выполнена")
     format_project(result, settings)
+    if audit:
+        uncertain = set(audit.get("uncertain_ids", []))
+        failed_models = bool(audit.get("warnings"))
+        for obj in result.objects:
+            if failed_models or uncertain.intersection(obj.ocr_ids):
+                obj.needs_review = True
+                obj.review_notes.append("Многоязычное OCR: неоднозначное чтение или недоступная модель")
     result.usage.append({"stage": "local", "seconds": round(time.monotonic()-start, 3)})
     validate_project(result)
     return result
