@@ -80,6 +80,17 @@ def local_ocr(project: Project, settings: Settings, engine=None, progress=lambda
         table_raw = engine.tables(image)
         result.raw["tables"] = table_raw
         result.objects = tables_from_result(table_raw, image, result.fragments)
+        if audit and settings.ocr_language_mode != "single":
+            # Paddle table detection uses the primary OCR run for layout. Its
+            # HTML cell strings may therefore still contain the wrong script.
+            # The actual line recognition variants own editable cell text.
+            by_id = {f.id: f for f in result.fragments}
+            for table in result.objects:
+                for cell in table.cells:
+                    if cell.ocr_ids:
+                        cell.text = "\\n".join(
+                            f.text for f in sorted((by_id[i] for i in cell.ocr_ids),
+                                                   key=lambda f: (f.bbox.y, f.bbox.x)))
     except (ImportError, RuntimeError, ValueError, OSError) as exc:
         # Text OCR remains available, but export requires acknowledgement of failure.
         result.messages.append(f"Обнаружение таблиц не завершено ({type(exc).__name__}). Проверьте и разметьте таблицы вручную.")
