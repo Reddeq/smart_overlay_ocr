@@ -97,16 +97,11 @@ class LanguageDialog(QDialog):
         layout.addWidget(self.auto)
         layout.addWidget(self.manual)
 
-        presets = QHBoxLayout()
-        for title, codes in self.PRESETS:
+        preset_grid = QGridLayout()
+        for index, (title, codes) in enumerate(self.PRESETS):
             button = QPushButton(title)
             button.clicked.connect(lambda checked=False, choice=codes: self.use_preset(choice))
-            presets.addWidget(button)
-        # Horizontal scroll is avoided; presets wrap into two columns.
-        preset_grid = QGridLayout()
-        while presets.count():
-            item = presets.takeAt(0)
-            preset_grid.addWidget(item.widget(), preset_grid.count() // 2, preset_grid.count() % 2)
+            preset_grid.addWidget(button, index // 2, index % 2)
         layout.addLayout(preset_grid)
 
         self.checks = {}
