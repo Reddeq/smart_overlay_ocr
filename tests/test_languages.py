@@ -36,7 +36,7 @@ def test_manual_routes_to_recognizer_families(codes, primary, extra):
 
 def test_auto_covers_bounded_scripts_without_requesting_legacy_lang_auto():
     settings = Settings(ocr_language_mode="auto")
-    assert resolve(settings) == ("ch", ("eslav", "korean", "arabic"))
+    assert resolve(settings) == ("ch", ("eslav", "korean", "arabic", "latin"))
 
 
 def test_settings_backward_compatibility_and_validation():
