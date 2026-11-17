@@ -46,7 +46,7 @@ class PaddleEngine:
 
     def recognize(self, image: Image.Image, offset=(0, 0), *, detection=None) -> tuple[list[Fragment], list[dict]]:
         from paddleocr import PaddleOCR
-        from .languages import MODELS, families, recognize_lines, resolve
+        from .languages import MODELS, recognize_lines, resolve
         lang, additional = resolve(self.settings)
         if self._ocr is None:
             self._ocr = PaddleOCR(lang=lang, ocr_version=self.settings.ocr_version,
@@ -74,7 +74,7 @@ class PaddleEngine:
             fragments, self.last_language_audit = recognize_lines(
                 image, fragments, group_for_language, additional,
                 auto=self.settings.ocr_language_mode == "auto",
-                model_factory=model_factory)
+                model_factory=model_factory, offset=offset)
             # Raw Paddle result stays intact for TableRecognitionPipelineV2.
             # Attach only compact final-language metadata for diagnostics.
         return fragments, raw
