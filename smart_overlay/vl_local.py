@@ -372,7 +372,15 @@ def local_vl_ocr(source: Project, settings, *, device="cpu", pipeline_factory=No
         raise LocalVLError(f"Ожидалась одна страница, PaddleOCR-VL вернула {len(pages)}")
     page = _as_plain_dict(pages[0])
     progress("PaddleOCR-VL: создание редактируемых фреймов и таблиц")
-    project = parse_page(source, settings, page)
+    try:
+        project = parse_page(source, settings, page)
+    except (LocalVLError, ValueError) as exc:
+        # This path previously discarded the only evidence of what VL read.
+        if diagnostics_dir is not None:
+            save_diagnostics(diagnostics_dir, page, source=source, error=exc)
+            raise LocalVLError(
+                f"{exc} Диагностика: {Path(diagnostics_dir).resolve()}") from exc
+        raise
     project.raw["local_vl"]["device"] = device
     project.usage.append({"stage": "paddle_vl_local", "seconds": round(time.monotonic()-begin, 3)})
     if diagnostics_dir is not None:
