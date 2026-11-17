@@ -177,11 +177,18 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
     settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
     engine = ocr_engine or settings.ocr_engine
+    if engine not in ("smart", "vl_local"):
+        raise ValueError("Неизвестный движок OCR")
+    settings.ocr_engine = engine
+    if vl_device is not None:
+        if vl_device not in ("cpu", "gpu:0"):
+            raise ValueError("PaddleOCR-VL: допустимы устройства cpu и gpu:0")
+        settings.vl_device = vl_device
     grouping_requests = table_requests = 0
     if engine == "vl_local":
         from .vl_local import local_vl_ocr
         project = local_vl_ocr(
-            source_project, settings, device=vl_device or settings.vl_device,
+            source_project, settings, device=settings.vl_device,
             diagnostics_dir=vl_diagnostics,
             progress=progress, check=lambda: _cancelled(cancelled))
         warnings.append("Экспериментальный локальный PaddleOCR-VL: "
