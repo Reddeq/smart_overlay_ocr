@@ -10,7 +10,9 @@ from .models import Model
 
 
 class Settings(Model):
-    language: str = "en"
+    language: str = "en"  # compatibility with the old single-language editor/CLI
+    ocr_language_mode: Literal["single", "auto", "manual"] = "single"
+    ocr_languages: list[str] = Field(default_factory=list)
     ocr_version: Literal["PP-OCRv5", "PP-OCRv4", "PP-OCRv3"] = "PP-OCRv5"
     endpoint: str = "https://openrouter.ai/api/v1"
     model: str = ""
@@ -31,6 +33,15 @@ class Settings(Model):
 
     @model_validator(mode="after")
     def valid(self):
+        if self.ocr_language_mode != "single":
+            if self.ocr_version != "PP-OCRv5":
+                raise ValueError("Автоопределение и языковые наборы требуют PP-OCRv5")
+            from .languages import LANGUAGES
+            if self.ocr_language_mode == "manual":
+                if not self.ocr_languages or len(self.ocr_languages) != len(set(self.ocr_languages)):
+                    raise ValueError("Выберите один или несколько разных языков OCR")
+                if set(self.ocr_languages) - set(LANGUAGES):
+                    raise ValueError("Неизвестный язык OCR в ручном наборе")
         if self.min_font > self.max_font:
             raise ValueError("Минимальный шрифт больше максимального")
         url = urlsplit(self.endpoint)
