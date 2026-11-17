@@ -205,7 +205,16 @@ def parse_page(source: Project, settings, page: dict):
         label = str(entry.get("block_label") or "").lower()
         counts[label] += 1
         if label in NON_TEXT_LABELS:
-            # Keep diagrams as raster under editable text; never white them out.
+            content = entry.get("block_content")
+            # Never turn an image (possibly the entire diagram) into an
+            # opaque PPTX text box; still record the ignored recognition.
+            skipped.append({
+                "index": index, "label": label,
+                "reason": ("image region contains text but no text-line geometry"
+                           if isinstance(content, str) and content.strip()
+                           else "graphic region without editable text geometry"),
+                "has_content": bool(isinstance(content, str) and content.strip()),
+            })
             continue
         content = entry.get("block_content")
         if not isinstance(content, str) or not content.strip():
@@ -247,8 +256,12 @@ def parse_page(source: Project, settings, page: dict):
             result.fragments.append(fragment)
             result.objects.append(obj)
     if not result.objects:
-        raise LocalVLError("PaddleOCR-VL не вернула ни одного пригодного текста/таблицы. "
-                           "PPTX не создаётся, исходник сохранён.")
+        labels = ", ".join(f"{k}: {v}" for k, v in counts.most_common())
+        raise LocalVLError(
+            "Нет пригодных для PPTX текстовых областей. "
+            + (f"Классы VL: {labels}. " if labels else "Список областей VL пуст. ")
+            + "Layout-модель могла принять весь чертёж за изображение; "
+              "нельзя накрывать его одним непрозрачным фреймом.")
     format_project(result, settings)
     for obj in result.objects:
         obj.needs_review = True
