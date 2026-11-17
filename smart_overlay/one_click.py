@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+from uuid import uuid4
 from typing import Callable
 
 from .export import export_pptx
@@ -102,6 +103,7 @@ def _smart(project: Project, settings: Settings, api_key: str, proxy: str,
         _mark_uncertain(project, "Не удалось подготовить VL-группировку: проверьте логические блоки")
         plan = None
 
+    grouping_failed = False
     if plan and plan.grouping_requests:
         _cancelled(cancelled)
         progress(f"VL: группировка фрагментов ({plan.grouping_requests} областей)")
@@ -115,11 +117,12 @@ def _smart(project: Project, settings: Settings, api_key: str, proxy: str,
             _mark_uncertain(project, "Ошибка проверки предложений VL")
         if result.status != "completed" or result.consensus["conflicts"] or result.consensus["blocked_ids"]:
             warnings.append("VL-группировка выполнена частично либо есть спорные области")
+        grouping_failed = result.status != "completed"
         remaining -= grouping_requests
 
     _cancelled(cancelled)
     tables = [o.id for o in project.objects if isinstance(o, Table) and o.needs_review and not o.excluded]
-    if tables and remaining:
+    if tables and remaining and not grouping_failed:
         try:
             table_plan = build_table_plan(project, settings, tables, review_text=False,
                                           review_structure=True, max_requests=remaining)
@@ -136,11 +139,11 @@ def _smart(project: Project, settings: Settings, api_key: str, proxy: str,
                     project = table_candidate_project(reviewed, selected_structures=accepted)
                 if reviewed.status != "completed" or len(accepted) != table_requests:
                     warnings.append("Некоторые таблицы требуют ручной проверки")
-        except ValueError as exc:
-            warnings.append(f"Автоматическая проверка таблиц недоступна: {exc}")
+        except (ValueError, RuntimeError, OSError) as exc:
+            warnings.append(f"Автоматическая проверка таблиц недоступна: {type(exc).__name__}")
             _mark_uncertain(project, "Проверьте структуру таблиц")
     elif tables:
-        warnings.append("Лимит запросов исчерпан: таблицы оставлены после локального распознавания")
+        warnings.append("VL-проверка таблиц пропущена: недостаточный бюджет или ошибка подключения")
     return project, grouping_requests, table_requests
 
 
@@ -191,7 +194,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     # The output isn't written if export fails. Export to a temporary filename
     # in the same directory and rename only when fully generated.
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.stem + ".building.pptx")
+    temporary = output.with_name(output.stem + ".building-" + uuid4().hex[:8] + ".pptx")
     try:
         export_pptx(project, temporary, settings, allow_unreviewed=True)
         _cancelled(cancelled)
@@ -202,12 +205,12 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
 
     # Keep a recoverable editable project in the per-user application directory,
     # not alongside client drawings; it includes the original raster and OCR text.
-    saved = data_dir() / "projects" / f"{project.source.sha256}.socr.json"
+    saved = data_dir() / "projects" / f"{project.source.sha256}-{uuid4().hex[:8]}.socr.json"
+    project.messages.extend(warnings)
     try:
         save_project(project, saved)
     except OSError as exc:
-        warnings.append(f"PPTX создан, но промежуточный проект не сохранён: {exc}")
-    project.messages.extend(warnings)
+        warnings.append(f"PPTX создан, но промежуточный проект не сохранён: {type(exc).__name__}")
     progress(f"Готово: {output}")
     return OneClickResult(project=project, pptx=output, project_file=saved,
                           warnings=warnings, grouping_requests=grouping_requests,
