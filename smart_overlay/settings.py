@@ -10,6 +10,8 @@ from .models import Model
 
 
 class Settings(Model):
+    ocr_engine: Literal["smart", "vl_local"] = "smart"
+    vl_device: Literal["cpu", "gpu:0"] = "cpu"
     language: str = "en"  # compatibility with the old single-language editor/CLI
     ocr_language_mode: Literal["single", "auto", "manual"] = "single"
     ocr_languages: list[str] = Field(default_factory=list)
