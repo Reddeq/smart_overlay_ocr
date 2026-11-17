@@ -33,6 +33,31 @@ def fragments_from_result(raw: dict, offset=(0, 0), origin="paddle") -> list[Fra
     return fragments
 
 
+def additional_detected_lines(pages, fragments, offset=(0, 0), *, origin="paddle"):
+    """Rescue detection polygons that the primary-language reader could not read.
+
+    Restrict this to multilingual mode. A secondary recognizer must actually
+    produce nonempty text before these provisional fragments enter the project.
+    """
+    from .geometry import intersection
+    extra = []
+    known = [f.bbox for f in fragments]
+    for page in pages:
+        for polygon in page.get("dt_polys", []):
+            points = [(float(x) + offset[0], float(y) + offset[1]) for x, y in polygon]
+            if len(points) != 4:
+                continue
+            box = polygon_box(points)
+            if box.w < 3 or box.h < 3:
+                continue
+            if any(intersection(box, prev) / min(box.w * box.h, prev.w * prev.h) > .6 for prev in known):
+                continue
+            extra.append(Fragment(id=uid("ocr"), text="", polygon=points, bbox=box,
+                                  rotation=angle(points), confidence=0, origin=origin))
+            known.append(box)
+    return extra
+
+
 class PaddleEngine:
     def __init__(self, settings: Settings):
         # Cached local inference must not depend on model-host connectivity probes.
@@ -63,7 +88,12 @@ class PaddleEngine:
         fragments = [f for page in raw for f in fragments_from_result(page, offset,
                      "region" if offset != (0, 0) else "paddle")]
         self.last_language_audit = {"active": [lang], "uncertain_ids": [], "warnings": []}
-        if additional and fragments:
+        provisional = []
+        if additional:
+            provisional = additional_detected_lines(
+                raw, fragments, offset, origin="region" if offset != (0, 0) else "paddle")
+        if additional and (fragments or provisional):
+            fragments.extend(provisional)
             # Reuse one detection result; recognition-only models see measured crops.
             def model_factory(model_name):
                 if model_name not in self._line_recognizers:
@@ -75,6 +105,11 @@ class PaddleEngine:
                 image, fragments, group_for_language, additional,
                 auto=self.settings.ocr_language_mode == "auto",
                 model_factory=model_factory, offset=offset)
+            # A blank provisional detection isn't a translated label. Retain
+            # only positively recognized text to avoid masking graphics.
+            fragments = [f for f in fragments if f.text.strip()]
+            self.last_language_audit["recovered_detections"] = sum(
+                1 for f in fragments if any(f.id == p.id for p in provisional))
             # Raw Paddle result stays intact for TableRecognitionPipelineV2.
             # Attach only compact final-language metadata for diagnostics.
         return fragments, raw
