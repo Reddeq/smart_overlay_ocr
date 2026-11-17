@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 from ..models import Project
-from ..geometry import rotated_frame
+from ..layout import text_layout
 from ..settings import Settings
 from ..structure import validate_project
 
@@ -44,12 +44,12 @@ def export_pptx(project: Project, output: str | Path, settings: Settings, *, all
     node = resolve_node()
     payload = project.model_dump()
     payload["allow_unreviewed"] = allow_unreviewed
-    fragments = {f.id: f for f in project.fragments}
     for obj in payload["objects"]:
         if obj["type"] == "text":
-            from ..models import Box
-            obj["frame"] = rotated_frame(Box(**obj["bbox"]), obj["rotation"],
-                                          [fragments[i].polygon for i in obj["ocr_ids"]]).model_dump()
+            original = next(o for o in project.objects if o.id == obj["id"])
+            frame, masks = text_layout(project, original)
+            obj["frame"] = frame.model_dump()
+            obj["masks"] = [b.model_dump() for b in masks]
     payload["settings"] = settings.model_dump()
     output = Path(output).resolve()
     with tempfile.TemporaryDirectory(prefix="smart-overlay-") as temp:

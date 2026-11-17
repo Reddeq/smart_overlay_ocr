@@ -26,7 +26,7 @@ def test_native_pptx_geometry_image_and_merges(project, tmp_path):
         assert int(size.attrib["cx"])*800 == int(size.attrib["cy"])*1200
         tree = slide.find("p:cSld/p:spTree", NS)
         assert tree[2].tag.endswith("pic")  # original is the first visible layer
-        assert len(slide.findall(".//p:sp", NS)) == 3  # one filled shape per label
+        assert len(slide.findall(".//p:sp", NS)) == 8  # five source-line masks + three text frames
         assert len(slide.findall(".//a:tbl", NS)) == 1
         assert slide.find('.//a:tc[@gridSpan="3"]', NS) is not None
         assert slide.find('.//a:tc[@rowSpan="2"]', NS) is not None
@@ -62,7 +62,7 @@ def test_export_unreviewed_when_explicitly_allowed(project, tmp_path):
     export_pptx(project, output, Settings(), allow_unreviewed=True)
     with ZipFile(output) as archive:
         slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
-        assert len(slide.findall(".//p:sp", NS)) == 3
+        assert len(slide.findall(".//p:sp", NS)) == 8
         assert len(slide.findall(".//a:tbl", NS)) == 1
     assert project.objects[0].needs_review and project.objects[-1].needs_review
 

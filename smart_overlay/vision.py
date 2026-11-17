@@ -278,8 +278,9 @@ def analysis_images(project: Project, settings: Settings) -> list[dict]:
         if len(tiles) > 64:
             raise VisionError("Изображение требует более 64 фрагментов: обработайте меньшие области")
         for x, y in tiles:
-            parts.append({"type": "text", "text": f"Detail tile at pixel origin ({x}, {y}); 64px overlap. Full-image context above."})
-            parts.append(image_part(image.crop((max(0, x-64), max(0, y-64), min(image.width, x+settings.tile_size+64), min(image.height, y+settings.tile_size+64))), settings.tile_size+128))
+            bounds = (max(0, x-64), max(0, y-64), min(image.width, x+settings.tile_size+64), min(image.height, y+settings.tile_size+64))
+            parts.append({"type": "text", "text": f"Detail tile: original-pixel bounds {bounds} (left, top, right, bottom); scale 1 image pixel per original pixel. Full-image context above."})
+            parts.append(image_part(image.crop(bounds), settings.tile_size+128))
     return parts
 
 

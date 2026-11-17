@@ -9,9 +9,9 @@ from smart_overlay.app import MainWindow, TableDialog
 
 
 @pytest.fixture(scope="module", autouse=True)
-def qapp():
+def qapp(gui_app):
     # Keep one QApplication alive across tests and queued QThread deletions.
-    app = QApplication.instance() or QApplication([])
+    app = gui_app
     app.setQuitOnLastWindowClosed(False)
     yield app
     app.processEvents()

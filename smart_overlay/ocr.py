@@ -42,14 +42,17 @@ class PaddleEngine:
         self._tables = None
         self._last_ocr = None
 
-    def recognize(self, image: Image.Image, offset=(0, 0)) -> tuple[list[Fragment], list[dict]]:
+    def recognize(self, image: Image.Image, offset=(0, 0), *, detection=None) -> tuple[list[Fragment], list[dict]]:
         from paddleocr import PaddleOCR
         if self._ocr is None:
             self._ocr = PaddleOCR(lang=self.settings.language, ocr_version=self.settings.ocr_version,
                                   use_doc_orientation_classify=False, use_doc_unwarping=False,
                                   use_textline_orientation=True, device="cpu",
                                   text_rec_score_thresh=0.0)
-        results = list(self._ocr.predict(cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)))
+        detection = detection or {}
+        if set(detection) - {"text_det_thresh", "text_det_box_thresh", "text_det_unclip_ratio"}:
+            raise ValueError("Неизвестный параметр детектора OCR")
+        results = list(self._ocr.predict(cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR), **detection))
         if offset == (0, 0):
             self._last_ocr = results[0] if results else None
         raw = [result_dict(r) for r in results]

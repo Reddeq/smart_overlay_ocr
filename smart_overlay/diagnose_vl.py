@@ -16,7 +16,7 @@ from pydantic import Field, ValidationError
 from .input import open_project, source_image
 from .models import Box, Fragment, Model, Project, Source, Table, Text
 from .settings import Settings, load_settings
-from .vision import (Analysis, analysis_images, analysis_packet, analysis_prompt, apply_analysis,
+from .vision import (Analysis, Reading, analysis_images, analysis_packet, analysis_prompt, apply_analysis,
                      image_part, request_payload, response_json, response_schema)
 from .vision_diagnostics import sanitized
 from .vision_transport import post_json, RequestTimedOut, ResponseReadError
@@ -436,6 +436,9 @@ def evaluate(case, raw):
         record["classification"] = "truncated_response"
         return record
     try:
+        if isinstance(result, Reading):
+            record.update(content_valid=None, classification='valid_content_unverified')
+            return record
         correct, detail = content_check(case, result)
         record.update(content_valid=correct, content_check=detail,
                       classification="valid_content" if correct else
@@ -445,15 +448,16 @@ def evaluate(case, raw):
     return record
 
 
-def run_case(case, settings, api_key):
+def run_case(case, settings, api_key, *, progress=lambda _: None, cancelled=lambda: False, proxy=None):
     record = case_plan(case)
     metadata = {}
     started = time.monotonic()
     try:
+        route = {"proxy": proxy} if proxy is not None else {}
         raw = post_json(settings.endpoint.rstrip("/")+"/chat/completions", api_key, wire(case),
                         connect_timeout=settings.connect_timeout, request_timeout=settings.request_timeout,
-                        progress=lambda _: None, cancelled=lambda: False, label="diagnose-vl "+case.name,
-                        observe=metadata.update)
+                        progress=progress, cancelled=cancelled, label="VL "+case.name,
+                        observe=metadata.update, **route)
         record.update(evaluate(case, raw))
     except (RequestTimedOut, ResponseReadError) as exc:
         transport = (exc.response or {}).get("_transport", {})

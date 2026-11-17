@@ -12,6 +12,7 @@ def validate_project(project: Project, for_export=False):
     if len(ids) != len(set(ids)):
         raise ValueError("Повторяющиеся ID OCR")
     known = set(ids)
+    fragments = {f.id: f for f in project.fragments}
     object_ids = [o.id for o in project.objects]
     if len(object_ids) != len(set(object_ids)):
         raise ValueError("Повторяющиеся ID объектов")
@@ -36,6 +37,13 @@ def validate_project(project: Project, for_export=False):
         elif not obj.excluded:
             for table in tables:
                 if intersection(obj.bbox, table.bbox) > 1:
+                    # A measured neighboring label may slightly cross a table edge.
+                    # Do not force it into a cell merely to satisfy disjoint frames.
+                    if (obj.ocr_ids and intersection(obj.bbox, table.bbox) <= obj.bbox.w*obj.bbox.h*0.5
+                            and all(i in fragments and contains(obj.bbox, fragments[i].bbox, 1)
+                                    and intersection(fragments[i].bbox, table.bbox)
+                                    <= fragments[i].bbox.w*fragments[i].bbox.h*0.5 for i in obj.ocr_ids)):
+                        continue
                     raise ValueError(f"{obj.id}: текстовый фрейм пересекает таблицу {table.id}")
         if for_export and not obj.excluded and obj.needs_review:
             raise ValueError(f"{obj.id}: требуется ручная проверка перед экспортом")

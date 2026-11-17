@@ -8,6 +8,7 @@ build/
 dist/
 .cache/
 outputs/
+/drawings/
 *.log
 *.socr.json
 !examples/*.socr.json

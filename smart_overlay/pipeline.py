@@ -40,6 +40,8 @@ def format_project(project: Project, settings: Settings, *, preserve_text_ids=()
             if obj.confidence < settings.confidence_threshold:
                 obj.needs_review = True
                 obj.review_notes.append("Низкая уверенность OCR")
+            project.raw.setdefault("automatic_text_formats", {})[obj.id] = {
+                "bbox": obj.bbox.model_dump(), "style": obj.style.model_dump(), "rotation": obj.rotation}
         else:
             obj.style.font = settings.font
             for cell in obj.cells:
@@ -177,7 +179,27 @@ def smart_ocr(project: Project, settings: Settings, api_key: str, cache: Path,
             tables = [o for o in result.objects if isinstance(o, Table)]
             active = [f for f in result.fragments if f.id not in result.ignored]
             for table in tables:
+                previous = {c.id: (set(c.ocr_ids), c.text) for c in table.cells}
                 assign_fragments(table, active)
+                by_id = {f.id: f for f in active}
+                for cell in table.cells:
+                    old_ids, old_text = previous[cell.id]
+                    added = set(cell.ocr_ids) - old_ids
+                    if set(cell.ocr_ids) == old_ids:
+                        continue
+                    # Preserve edits to existing text. New geometry must not silently
+                    # replace a manually corrected cell with raw OCR.
+                    old_raw = "\n".join(f.text for f in sorted(
+                        (f for f in result.fragments if f.id in old_ids),
+                        key=lambda f: (f.bbox.y, f.bbox.x)))
+                    if old_text == old_raw:
+                        cell.text = "\n".join(f.text for f in sorted(
+                            (by_id[i] for i in cell.ocr_ids), key=lambda f: (f.bbox.y, f.bbox.x)))
+                    else:
+                        extra = "\n".join(by_id[i].text for i in cell.ocr_ids if i in added)
+                        cell.text = "\n".join(part for part in (old_text, extra) if part)
+                    table.needs_review = True
+                    table.review_notes.append("Добавлен текст повторного OCR: проверьте порядок строк в ячейке")
             result.objects = tables
             base_texts(result)
             validate_project(result)

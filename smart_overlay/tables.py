@@ -87,15 +87,42 @@ def geometric_tables(image: Image.Image, fragments: list[Fragment], existing: li
                                 cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(20, image.height//40))))
     mask = cv2.bitwise_or(horizontal, vertical)
     count, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    candidates = [Box(x=int(x), y=int(y), w=int(w), h=int(h)) for x,y,w,h,area in stats[1:count]
+                  if w >= 50 and h >= 35 and area >= 150]
+    # Circuit wires connect table grids to the whole diagram. Detect matching
+    # vertical borders and repeated full-width rows independently of connectivity.
+    contours, _ = cv2.findContours(vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    borders = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if h >= 50 and w <= 7:
+            borders.append((x+w//2, y, y+h))
+    for index, (x, top, bottom) in enumerate(borders):
+        for other_x, other_top, other_bottom in borders[index+1:]:
+            left, right = sorted((x, other_x))
+            if (not 45 <= right-left <= image.width*.7 or abs(top-other_top) > 8
+                    or abs(bottom-other_bottom) > 8):
+                continue
+            y0, y1 = max(top, other_top), min(bottom, other_bottom)
+            counts = np.mean(horizontal[y0:y1, left:right+1] > 0, axis=1)
+            indexes = np.flatnonzero(counts > .9)
+            groups = np.split(indexes, np.flatnonzero(np.diff(indexes) > 2)+1)
+            rows = [y0+float(np.mean(g)) for g in groups if len(g)]
+            if len(rows) < 5:
+                continue
+            gaps = np.diff(rows)
+            if gaps.min() < 8 or gaps.max()/gaps.min() > 4:
+                continue
+            x0, yy0 = max(0,left-2), max(0,int(rows[0])-2)
+            candidates.append(Box(x=x0, y=yy0, w=min(image.width,right+3)-x0,
+                                  h=min(image.height,int(np.ceil(rows[-1]))+3)-yy0))
     found = []
-    for x, y, width, height, area in stats[1:count]:
-        if width < 50 or height < 35 or area < 150:
-            continue
-        bbox = Box(x=int(x), y=int(y), w=int(width), h=int(height))
+    for bbox in sorted(candidates, key=lambda b: b.w*b.h, reverse=True):
+        x,y,width,height = bbox.x,bbox.y,bbox.w,bbox.h
         if any(intersection(bbox, t.bbox) > 0 for t in existing+found):
             continue
         vx, hy = grid_lines(image, bbox)
-        if len(vx) < 3 or len(hy) < 3:
+        if len(vx) < 2 or len(hy) < 3 or (len(vx) == 2 and len(hy) < 5):
             continue
         # Avoid treating partially connected diagram lines as a closed table.
         if vx[0] > 4 or hy[0] > 4 or width-vx[-1] > 4 or height-hy[-1] > 4:
@@ -166,11 +193,11 @@ def assign_fragments(table: Table, fragments: list[Fragment]):
         cell.ocr_ids = []
     for fragment in fragments:
         overlap = intersection(table.bbox, fragment.bbox) / (fragment.bbox.w * fragment.bbox.h)
-        if overlap <= 0:
+        if overlap <= 0.5:
+            if overlap > 0:
+                table.needs_review = True
+                table.review_notes.append(f"Соседний фрагмент {fragment.id} частично пересекает таблицу; оставлен вне ячеек")
             continue
-        if overlap < 0.5:
-            table.needs_review = True
-            table.review_notes.append(f"Фрагмент {fragment.id} пересекает границу таблицы")
         ranked = sorted(table.cells, key=lambda c: intersection(cell_box(table, c), fragment.bbox), reverse=True)
         best = ranked[0]
         if not contains(cell_box(table, best), fragment.bbox, tolerance=3):

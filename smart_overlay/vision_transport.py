@@ -81,7 +81,7 @@ class ChatStream:
 
 
 def post_json(url, api_key, body, *, connect_timeout, request_timeout,
-              progress, cancelled, label, observe=None):
+              progress, cancelled, label, observe=None, proxy=None):
     async def run():
         started = time.monotonic()
         phase = "подключение к API"
@@ -133,8 +133,9 @@ def post_json(url, api_key, body, *, connect_timeout, request_timeout,
             nonlocal phase
             timeout = httpx.Timeout(connect=connect_timeout, read=request_timeout,
                                     write=min(30, request_timeout), pool=connect_timeout)
+            route = {"proxy": proxy, "trust_env": False} if proxy is not None else {}
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
-                                         verify=ssl.create_default_context()) as client:
+                                         verify=ssl.create_default_context(), **route) as client:
                 async with client.stream("POST", url, content=body,
                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + api_key},
                          extensions={"trace": trace}) as response:

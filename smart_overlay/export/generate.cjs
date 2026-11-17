@@ -21,11 +21,22 @@ async function generate(project, output) {
                         margin: 0, breakLine: false, valign: 'mid' });
   for (const obj of project.objects) {
     if (obj.excluded) continue;
+    // Empty review regions carry no replacement text and must not erase the source.
+    if (obj.type === 'text' && !obj.text.trim()) continue;
     if (obj.needs_review && project.allow_unreviewed !== true) throw new Error(`Review required: ${obj.id}`);
     const b = obj.type === 'text' && obj.frame ? obj.frame : obj.bbox;
     const position = { x: b.x*scale, y: b.y*scale, w: b.w*scale, h: b.h*scale };
     if (obj.type === 'text') {
+      for (const mask of obj.masks || []) {
+        slide.addShape(pptx.ShapeType.rect, {
+          x: mask.x*scale, y: mask.y*scale, w: mask.w*scale, h: mask.h*scale,
+          fill: { color: hex(obj.style.fill) },
+          line: { transparency: 100, color: hex(obj.style.fill) },
+          objectName: `${obj.id}_mask`
+        });
+      }
       slide.addText(obj.text, { ...position, ...style(obj.style), rotate: (obj.rotation+360)%360,
+                     fill: { color: hex(obj.style.fill), transparency: 100 },
                      line: { color: hex(obj.style.fill), transparency: 100 },
                      paraSpaceAfterPt: 0, charSpacing: 0, wrap: true,
                      objectName: obj.id, isTextBox: true });
