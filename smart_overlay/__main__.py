@@ -18,6 +18,14 @@ def main():
     recognize.add_argument("--mode", choices=["local", "smart"], default="local")
     recognize.add_argument("--settings", type=Path)
     recognize.add_argument("--consent-api", action="store_true")
+    one = sub.add_parser("convert", help="One-click drawing to editable PPTX")
+    one.add_argument("image", type=Path)
+    one.add_argument("--output", type=Path)
+    one.add_argument("--settings", type=Path)
+    one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
+    one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
+    one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
+    sub.add_parser("editor", help="Open the legacy correction editor")
     export = sub.add_parser("export", help="Export an already reviewed project without OCR")
     export.add_argument("project", type=Path)
     export.add_argument("output", type=Path)
@@ -30,8 +38,23 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     if not args.command:
+        from .quick_app import run_quick_app
+        return run_quick_app()
+    if args.command == "editor":
         from .app import run_app
         return run_app()
+    if args.command == "convert":
+        from .one_click import convert_drawing
+        if args.smart and not args.consent_api:
+            parser.error("Cloud processing requires --consent-api for this drawing")
+        settings = Settings.model_validate_json(args.settings.read_text("utf-8")) if args.settings else Settings()
+        result = convert_drawing(args.image, destination=args.output, settings=settings,
+                                 api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                                 consent=args.smart and args.consent_api, proxy=args.proxy, progress=print)
+        print(result.pptx)
+        for warning in result.warnings:
+            logging.warning(warning)
+        return 0
     if args.command == "diagnose-vl":
         from .diagnose_vl import main as diagnose
         try:
