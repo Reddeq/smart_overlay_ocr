@@ -205,6 +205,11 @@ def recognize_lines(image, fragments, primary_group, requested_groups, *,
     uncertain = []
     for fragment, readings in zip(fragments, options):
         best, conflict = choose(readings)
+        if auto and conflict and fragment.text.strip():
+            # With unknown languages, uncalibrated scores from competing
+            # scripts must not silently replace a plausible primary reading.
+            # Retain it and request inspection of the conflict.
+            best = readings[0]
         updated = fragment.model_copy(deep=True)
         updated.text, updated.confidence = best.text, best.confidence
         chosen.append(updated)
