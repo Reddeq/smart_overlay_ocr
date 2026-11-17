@@ -85,6 +85,9 @@ class QuickWindow(QMainWindow):
         self.setWindowTitle("Smart Overlay OCR")
         self.resize(1100, 760)
         self.settings = load_settings()
+        if not (data_dir() / "settings.json").exists():
+            # Default to Russian technical drawings; saved preferences take priority.
+            self.settings.language = "ru"
         # Automatic background sampling retains more of the source's appearance.
         self.settings.fill_mode = "auto"
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
