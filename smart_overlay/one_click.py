@@ -164,8 +164,17 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     output = available_pptx(source, destination)
     warnings: list[str] = []
     _cancelled(cancelled)
+    progress("Загрузка чертежа")
+    source_project = load_image(source)
+    short_side = min(source_project.source.width, source_project.source.height)
+    long_side = max(source_project.source.width, source_project.source.height)
+    smallest_scale, largest_scale = 1 / short_side, 56 / long_side
+    if smallest_scale > largest_scale:
+        raise ValueError("Слишком вытянутый чертёж для одного слайда PowerPoint")
+    # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
+    settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
     progress("Распознавание текста и таблиц (PaddleOCR / OpenCV)")
-    project = local_ocr(load_image(source), settings, progress=progress)
+    project = local_ocr(source_project, settings, progress=progress)
     _cancelled(cancelled)
     grouping_requests = table_requests = 0
 
