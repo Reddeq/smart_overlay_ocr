@@ -4,9 +4,9 @@ One PaddleOCR pass provides line geometry and table-detection context. Additiona
 PP-OCRv5 text recognizers operate only on those measured line crops, preserving
 OCR IDs/polygons. No VL API or language-detection network service is involved.
 """
-from collections import Counter
 from dataclasses import dataclass
 import re
+import unicodedata
 
 import numpy as np
 
@@ -29,7 +29,7 @@ MODELS = {
     "korean": ("korean", "korean_PP-OCRv5_mobile_rec"),
     "arabic": ("ar", "arabic_PP-OCRv5_mobile_rec"),
 }
-AUTO_GROUPS = ("cjk", "eslav", "korean", "arabic")
+AUTO_GROUPS = ("cjk", "eslav", "korean", "arabic", "latin")
 # English is already supported in cjk/eslav/korean; Arabic needs English added.
 EMBEDDED_ENGLISH = {"cjk", "eslav", "korean", "latin", "en"}
 GROUP_SEQUENCE = ("cjk", "eslav", "korean", "arabic", "latin", "en")
@@ -79,6 +79,11 @@ def native_count(text, group):
 
 
 def native_evidence(text, group, confidence):
+    if group == "latin":
+        # English is already covered by the primary CJK model. Probe the Latin
+        # recognizer for diacritics that the primary model may not support.
+        return confidence >= .68 and any(
+            ord(c) > 127 and "LATIN" in unicodedata.name(c, "") for c in text)
     letters = sum(c.isalpha() for c in text)
     native = native_count(text, group)
     return bool(native >= 2 and native / max(letters, 1) >= .45 and confidence >= .62)
@@ -92,7 +97,7 @@ def group_score(text, confidence, group):
     if group in SCRIPT_RANGES:
         rank += .17 * (native / letters) if native >= 2 else -.06
     elif group == "latin":
-        rank += .06 if any(ord(c) > 127 and c.isalpha() for c in text) else 0
+        rank += .09 if any(ord(c) > 127 and "LATIN" in unicodedata.name(c, "") for c in text) else 0
     elif group == "en":
         rank += .02 if re.search(r"[A-Za-z]{2,}", text) else 0
     if not any(c.isalnum() for c in text):
