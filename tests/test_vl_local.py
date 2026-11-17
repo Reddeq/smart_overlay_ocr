@@ -92,7 +92,7 @@ def test_unknown_image_regions_and_bad_table_are_not_silently_hidden(drawing):
 
 def test_empty_model_result_fails_no_false_success(drawing):
     source, _ = drawing
-    with pytest.raises(LocalVLError, match="не вернула"):
+    with pytest.raises(LocalVLError, match="Нет пригодных"):
         parse_page(source, Settings(), page())
     with pytest.raises(LocalVLError, match="parsing_res_list"):
         parse_page(source, Settings(), {"width":640, "height":480})
@@ -164,7 +164,7 @@ def test_model_failure_never_creates_empty_pptx(drawing, monkeypatch, tmp_path):
                         lambda *, device: MockLocalPipeline(page()))
     monkeypatch.setattr("smart_overlay.one_click.export_pptx",
                         lambda *a, **k: pytest.fail("Must not export empty layout"))
-    with pytest.raises(LocalVLError, match="не вернула"):
+    with pytest.raises(LocalVLError, match="Нет пригодных"):
         convert_drawing(path, ocr_engine="vl_local", vl_device="cpu")
     assert not path.with_suffix(".pptx").exists()
 
@@ -185,3 +185,31 @@ def test_quick_ui_has_independent_local_vl_switch(gui_app, monkeypatch, tmp_path
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_image_only_vl_failure_saves_raw_output_and_layout(drawing, tmp_path):
+    """Real drawings classified as one 'image' must not erase the raster."""
+    source, _ = drawing
+    from smart_overlay.vl_local import diagnostic_summary
+    raw = page({
+        "block_label": "image",
+        "block_bbox": [0, 0, 640, 480],
+        "block_content": "Some text found in the diagram",
+    })
+    pipeline = MockLocalPipeline(raw)
+    out = tmp_path / "image-only"
+    with pytest.raises(LocalVLError, match="Классы VL: image: 1"):
+        local_vl_ocr(
+            source, Settings(), device="cpu",
+            pipeline_factory=lambda *, device: pipeline,
+            diagnostics_dir=out)
+    assert (out / "paddle-vl-result.json").exists()
+    assert (out / "paddle-vl-summary.json").exists()
+    assert (out / "paddle-vl-boxes.png").exists()
+    saved = json.loads((out / "paddle-vl-result.json").read_text("utf-8"))
+    assert saved["parsing_res_list"][0]["block_content"].startswith("Some text")
+    summary = json.loads((out / "paddle-vl-summary.json").read_text("utf-8"))
+    assert summary["status"] == "failed"
+    assert summary["block_labels"] == {"image": 1}
+    assert summary["regions"][0]["has_content"]
+    assert diagnostic_summary(raw)["layout_block_count"] == 1
