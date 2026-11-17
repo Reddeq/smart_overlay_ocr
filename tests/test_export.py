@@ -102,3 +102,20 @@ def test_node_not_found_has_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setattr("smart_overlay.export.PROJECT_ROOT", tmp_path)
     with pytest.raises(RuntimeError, match=r"\.runtime/node"):
         resolve_node()
+
+
+def test_inline_text_fill_creates_only_editable_text_frames(project, tmp_path):
+    """One-click output has no separate white mask rectangles."""
+    if not shutil.which("node"):
+        pytest.skip("Node.js not installed")
+    output = tmp_path / "one-click.pptx"
+    export_pptx(project, output, Settings(fill_mode="auto"), inline_text_fill=True)
+    with ZipFile(output) as archive:
+        slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        text_shapes = slide.findall(".//p:sp", NS)
+        assert len(text_shapes) == 3
+        assert len(slide.findall(".//a:tbl", NS)) == 1
+        for shape in text_shapes:
+            assert shape.find("p:spPr/a:solidFill", NS) is not None
+            name = shape.find("p:nvSpPr/p:cNvPr", NS).attrib["name"]
+            assert not name.endswith("_mask")
