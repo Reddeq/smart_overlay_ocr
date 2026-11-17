@@ -193,6 +193,11 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
             progress=progress, check=lambda: _cancelled(cancelled))
         warnings.append("Экспериментальный локальный PaddleOCR-VL: "
                         "проверьте геометрию фреймов и структуру таблиц")
+        details = project.raw.get("local_vl", {})
+        if details.get("skipped"):
+            warnings.append(
+                f"Не преобразовано областей: {len(details['skipped'])}. "
+                "Причины и координаты — в локальной диагностике")
     elif engine == "smart":
         progress("Распознавание текста и таблиц (PaddleOCR / OpenCV)")
         project = local_ocr(source_project, settings, progress=progress)
