@@ -157,3 +157,25 @@ def test_language_chooser_presets_and_auto_default(gui_app, monkeypatch, tmp_pat
         window.close()
         dialog.deleteLater()
         window.deleteLater()
+
+
+def test_unread_primary_detection_can_be_recovered_by_secondary():
+    from smart_overlay.ocr import additional_detected_lines
+    project, _ = synthetic()
+    known = project.fragments[:1]
+    raw = [{"dt_polys": [
+        [[known[0].bbox.x, known[0].bbox.y],
+         [known[0].bbox.right, known[0].bbox.y],
+         [known[0].bbox.right, known[0].bbox.bottom],
+         [known[0].bbox.x, known[0].bbox.bottom]],
+        [[350, 120], [445, 120], [445, 144], [350, 144]]
+    ]}]
+    missing = additional_detected_lines(raw, known)
+    assert len(missing) == 1
+    assert missing[0].text == ""
+    fake = FakeRecognizer([("Основной", .96), ("Питание", .97)])
+    combined, audit = recognize_lines(
+        Image.new("RGB", (600, 180)), known + missing, "cjk", ("eslav",),
+        auto=False, model_factory=lambda _: fake)
+    assert combined[-1].text == "Питание"
+    assert combined[-1].bbox == missing[-1].bbox
