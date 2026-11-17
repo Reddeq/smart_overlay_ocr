@@ -61,6 +61,9 @@ def default_pipeline(*, device: str):
             use_doc_unwarping=False,
             use_layout_detection=True,
             use_chart_recognition=False,
+            # Schematics are often classified as images rather than pages.
+            # Ask VL to inspect content of image regions as well.
+            use_ocr_for_image_block=True,
             use_queues=False,
             format_block_content=False,
         )
