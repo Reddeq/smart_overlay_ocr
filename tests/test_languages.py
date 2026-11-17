@@ -189,3 +189,16 @@ def test_auto_confusable_script_keeps_original_and_requests_review():
         "cjk", ("eslav",), auto=True, model_factory=lambda _: fake)
     assert result[0].text == project.fragments[0].text
     assert result[0].id in audit["uncertain_ids"]
+
+
+def test_legacy_advanced_dialog_does_not_erase_multilingual_settings(gui_app):
+    from smart_overlay.app import SettingsDialog
+    original = Settings(ocr_language_mode="manual", ocr_languages=["ch", "ru"])
+    dialog = SettingsDialog(original, "")
+    try:
+        result = dialog.value()
+        assert result.ocr_language_mode == "manual"
+        assert result.ocr_languages == ["ch", "ru"]
+    finally:
+        dialog.close()
+        dialog.deleteLater()
