@@ -36,7 +36,7 @@ def resolve_node() -> str:
                        "или задайте полный путь в SMART_OVERLAY_NODE. Инструкция: README.md.")
 
 
-def export_pptx(project: Project, output: str | Path, settings: Settings, *, allow_unreviewed=False):
+def export_pptx(project: Project, output: str | Path, settings: Settings, *, allow_unreviewed=False, inline_text_fill=False):
     validate_project(project, for_export=not allow_unreviewed)
     width, height = project.source.width*settings.inches_per_pixel, project.source.height*settings.inches_per_pixel
     if max(width, height) > 56 or min(width, height) < 1:
@@ -44,6 +44,7 @@ def export_pptx(project: Project, output: str | Path, settings: Settings, *, all
     node = resolve_node()
     payload = project.model_dump()
     payload["allow_unreviewed"] = allow_unreviewed
+    payload["inline_text_fill"] = inline_text_fill
     for obj in payload["objects"]:
         if obj["type"] == "text":
             original = next(o for o in project.objects if o.id == obj["id"])
