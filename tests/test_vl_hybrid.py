@@ -66,6 +66,7 @@ def test_table_cell_corrected_only_when_ocr_ownership_is_unambiguous():
     first=project.objects.pop(0)
     frag=project.fragments[0]
     table=Table(id="new_table",bbox=first.bbox,rows=1,columns=1,
+                ocr_ids=[frag.id],
                 row_heights=[first.bbox.h],col_widths=[first.bbox.w],
                 cells=[Cell(row=0,col=0,text=frag.text,ocr_ids=[frag.id])])
     project.objects.append(table)
