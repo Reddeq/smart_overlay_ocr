@@ -14,6 +14,12 @@ class Settings(Model):
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
     hybrid_max_checks: int = Field(default=3, ge=0, le=30)
     hybrid_confidence: float = Field(default=0.74, ge=0, le=1)
+    ensemble_enabled: bool = True
+    ensemble_apply_consensus: bool = False
+    ensemble_batch_vl: bool = True
+    ensemble_batch_size: int = Field(default=8, ge=2, le=16)
+    ensemble_max_batches: int = Field(default=1, ge=0, le=4)
+    ensemble_batch_timeout: int = Field(default=160, ge=20, le=600)
     vl_strategy: Literal["detect", "tiles"] = "detect"
     vl_max_regions: int = Field(default=80, ge=1, le=1000)
     vl_region_timeout_seconds: int = Field(default=60, ge=10, le=1800)
