@@ -416,7 +416,7 @@ class QuickWindow(QMainWindow):
     def cancel_work(self):
         if self.worker:
             self.worker.requestInterruption()
-            self.status_text.setText("Остановка после текущего этапа…")
+            self.status_text.setText("Останавливаю отдельный процесс VL…")
             self.cancel.setEnabled(False)
 
     def done(self, result):
