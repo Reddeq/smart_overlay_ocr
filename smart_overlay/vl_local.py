@@ -26,7 +26,7 @@ from .input import source_image
 from .models import Box, Fragment, Project, Table, Text, uid
 from .pipeline import format_project
 from .structure import validate_project
-from .tables import grid_lines, parse_html
+from .tables import geometric_tables, grid_lines, parse_html
 
 VERSION = "v1.6"
 TEXT_LABELS = {
@@ -43,7 +43,7 @@ class LocalVLError(RuntimeError):
     """Local PaddleOCR-VL engine failed or returned unusable structure."""
 
 
-def default_pipeline(*, device: str):
+def default_pipeline(*, device: str, layout: bool = True):
     """Import lazily: default Smart OCR works with its existing pinned stack."""
     if device not in ("cpu", "gpu:0"):
         raise ValueError("Устройство PaddleOCR-VL: cpu или gpu:0")
@@ -61,11 +61,11 @@ def default_pipeline(*, device: str):
             cpu_threads=max(2, min(12, os.cpu_count() or 4)),
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_layout_detection=True,
+            use_layout_detection=layout,
             use_chart_recognition=False,
             # Schematics are often classified as images rather than pages.
             # Ask VL to inspect content of image regions as well.
-            use_ocr_for_image_block=True,
+            use_ocr_for_image_block=layout,
             use_queues=False,
             format_block_content=False,
         )
@@ -159,15 +159,15 @@ def _table_from_html(html, box, image):
     return table
 
 
-def _text_from_block(text, box, label):
+def _text_from_block(text, box, label, polygon=None, rotation=0):
     if not text.strip():
         return None, None
     identifier = uid("ocr")
-    polygon = [(box.x, box.y), (box.right, box.y),
-               (box.right, box.bottom), (box.x, box.bottom)]
+    polygon = polygon or [(box.x, box.y), (box.right, box.y),
+                          (box.right, box.bottom), (box.x, box.bottom)]
     fragment = Fragment(id=identifier, text=text, bbox=box, polygon=polygon,
-                        rotation=0, confidence=.5)
-    obj = Text(id=uid("text"), text=text, bbox=box.model_copy(),
+                        rotation=rotation, confidence=.5, origin="region")
+    obj = Text(id=uid("text"), text=text, bbox=box.model_copy(), rotation=rotation,
                ocr_ids=[identifier], confidence=.5, needs_review=True,
                review_notes=["VL определила границу блока, а не каждой строки: "
                              "проверьте положение фрейма и исходный текст",
@@ -253,10 +253,32 @@ def parse_page(source: Project, settings, page: dict):
             # Do not cover other recognized labels/tables with a second overlay.
             skipped.append({"index": index, "label": label, "reason": "overlaps existing object"})
             continue
-        fragment, obj = _text_from_block(content, box, label)
+        polygon = entry.get("block_polygon")
+        rotation = float(entry.get("block_rotation", 0))
+        if polygon is not None:
+            try:
+                polygon = [(float(x), float(y)) for x,y in polygon]
+                if len(polygon) != 4 or not all(
+                    math.isfinite(c) for pair in polygon for c in pair):
+                    raise ValueError("polygon")
+            except (TypeError, ValueError):
+                skipped.append({"index":index,"label":label,"reason":"invalid detector polygon"})
+                continue
+        fragment, obj = _text_from_block(content, box, label,
+                                         polygon=polygon, rotation=rotation)
         if fragment is not None:
             result.fragments.append(fragment)
             result.objects.append(obj)
+    if page.get("_vl_detector_geometry") and result.fragments:
+        # A detector/VLM pair still uses the same local OpenCV table geometry
+        # as the classic pipeline, without reading any conventional OCR text.
+        geometric = geometric_tables(original, result.fragments, [])
+        used = {i for table in geometric for i in table.ocr_ids}
+        result.objects = [
+            obj for obj in result.objects
+            if not isinstance(obj, Text) or not set(obj.ocr_ids) & used]
+        result.objects.extend(geometric)
+        issues.append(f"OpenCV: найдено таблиц по линованной сетке: {len(geometric)}")
     if not result.objects:
         labels = ", ".join(f"{k}: {v}" for k, v in counts.most_common())
         raise LocalVLError(
@@ -283,6 +305,7 @@ def parse_page(source: Project, settings, page: dict):
     result.raw["local_vl"] = {
         "version": VERSION, "engine": "paddle", "source": "local",
         "block_labels": dict(counts), "skipped": skipped, "issues": issues,
+        "detector_geometry": bool(page.get("_vl_detector_geometry")),
         "converted_text_blocks": sum(isinstance(o, Text) for o in result.objects),
         "converted_tables": sum(isinstance(o, Table) for o in result.objects),
     }
