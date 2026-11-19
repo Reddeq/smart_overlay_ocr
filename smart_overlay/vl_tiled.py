@@ -7,6 +7,7 @@ The worker is a *local* Python child process; it never invokes a web API.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from queue import Empty, Queue
 import subprocess
@@ -176,7 +177,9 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=errlog,
                 stdin=subprocess.DEVNULL, text=True, bufsize=1,
-                encoding="utf-8", errors="replace")
+                encoding="utf-8", errors="replace",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                     "PYTHONUTF8": "1"})
             reader = Thread(target=_monitor_lines, args=(proc.stdout,events), daemon=True)
             reader.start()
             while True:
