@@ -26,7 +26,7 @@ def main():
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
     one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
     one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
-    one.add_argument("--ocr-engine", choices=["smart", "vl_local"], default=None,
+    one.add_argument("--ocr-engine", choices=["smart", "vl_local", "hybrid_local"], default=None,
                      help="Use classic Smart OCR or independent, fully local PaddleOCR-VL 1.6")
     one.add_argument("--vl-device", choices=["cpu", "gpu:0"], default=None,
                      help="PaddleOCR-VL runtime device; CPU is the safe default")
@@ -39,6 +39,8 @@ def main():
     one.add_argument("--vl-strategy", choices=["detect","tiles"],
                      help="detect: text lines only (default); tiles: legacy document layout")
     one.add_argument("--vl-max-regions", type=int, help="Maximum text lines for local VL")
+    one.add_argument("--hybrid-max-checks", type=int,
+                     help="Maximum suspect lines for local VL re-reading (default: 3)")
     one.add_argument("--vl-preflight", type=int, help="Maximum seconds for the first text line")
     one.add_argument("--vl-total-timeout", type=int, help="Overall local VL inference budget (seconds)")
     bench = sub.add_parser("benchmark-vl", help="Local one-line PaddleOCR-VL benchmark, no PPTX")
@@ -87,14 +89,14 @@ def main():
         return 0
     if args.command == "convert":
         from .one_click import convert_drawing
-        if args.smart and args.ocr_engine == "vl_local":
-            parser.error("Local PaddleOCR-VL and --smart (cloud) are mutually exclusive")
+        if args.smart and args.ocr_engine in ("vl_local", "hybrid_local"):
+            parser.error("Local VL/hybrid and --smart (cloud) are mutually exclusive")
         if args.smart and not args.consent_api:
             parser.error("Cloud processing requires --consent-api for this drawing")
         settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
                     if args.settings else Settings(ocr_language_mode="auto"))
-        if args.smart and (args.ocr_engine or settings.ocr_engine) == "vl_local":
-            parser.error("Local PaddleOCR-VL cannot be combined with --smart cloud mode")
+        if args.smart and (args.ocr_engine or settings.ocr_engine) in ("vl_local", "hybrid_local"):
+            parser.error("Local PaddleOCR-VL/hybrid cannot be combined with cloud --smart")
         if args.languages is not None:
             codes = [c.strip() for c in args.languages.split(",")]
             settings = Settings.model_validate({**settings.model_dump(),
@@ -107,7 +109,8 @@ def main():
                      "vl_strategy": args.vl_strategy,
                      "vl_max_regions": args.vl_max_regions,
                      "vl_preflight_seconds": args.vl_preflight,
-                     "vl_total_timeout_seconds": args.vl_total_timeout}
+                     "vl_total_timeout_seconds": args.vl_total_timeout,
+                     "hybrid_max_checks": args.hybrid_max_checks}
         if any(v is not None for v in overrides.values()):
             settings = Settings.model_validate({
                 **settings.model_dump(),
