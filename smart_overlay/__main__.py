@@ -41,6 +41,12 @@ def main():
     one.add_argument("--vl-max-regions", type=int, help="Maximum text lines for local VL")
     one.add_argument("--hybrid-max-checks", type=int,
                      help="Maximum suspect lines for local VL re-reading (default: 3)")
+    one.add_argument("--ensemble-only", action="store_true",
+                     help="Compare PP-OCRv5/v6 on all lines without expensive local VL")
+    one.add_argument("--ensemble-batch-size", type=int, help="Numbered VL crop batch size (2-16)")
+    one.add_argument("--ensemble-max-batches", type=int, help="Maximum VL batch calls (default 1)")
+    one.add_argument("--ensemble-apply-consensus", action="store_true",
+                     help="Apply conservative low-confidence OCR consensus (review still required)")
     one.add_argument("--vl-preflight", type=int, help="Maximum seconds for the first text line")
     one.add_argument("--vl-total-timeout", type=int, help="Overall local VL inference budget (seconds)")
     bench = sub.add_parser("benchmark-vl", help="Local one-line PaddleOCR-VL benchmark, no PPTX")
@@ -110,11 +116,18 @@ def main():
                      "vl_max_regions": args.vl_max_regions,
                      "vl_preflight_seconds": args.vl_preflight,
                      "vl_total_timeout_seconds": args.vl_total_timeout,
-                     "hybrid_max_checks": args.hybrid_max_checks}
+                     "hybrid_max_checks": args.hybrid_max_checks,
+                     "ensemble_batch_size": args.ensemble_batch_size,
+                     "ensemble_max_batches": args.ensemble_max_batches}
         if any(v is not None for v in overrides.values()):
             settings = Settings.model_validate({
                 **settings.model_dump(),
                 **{k: v for k, v in overrides.items() if v is not None}})
+        if args.ensemble_only or args.ensemble_apply_consensus:
+            settings = Settings.model_validate({
+                **settings.model_dump(),
+                "ensemble_batch_vl": not args.ensemble_only,
+                "ensemble_apply_consensus": args.ensemble_apply_consensus})
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
                                  consent=args.smart and args.consent_api, proxy=args.proxy,
