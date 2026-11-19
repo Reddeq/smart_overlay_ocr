@@ -56,7 +56,12 @@ def detect_lines(image, detector, *, min_score=.35, max_regions=120):
             x1, y1 = pts.max(axis=0).tolist()
             if x0 < -2 or y0 < -2 or x1 > w + 2 or y1 > h + 2:
                 raise ValueError("out of image")
-            x0, y0, x1, y1 = max(0.,x0),max(0.,y0),min(float(w),x1),min(float(h),y1)
+            # Some detectors overshoot the page edge by 1-2 pixels; the
+            # source polygon must still pass strict Project validation.
+            pts[:,0] = np.clip(pts[:,0],0,w)
+            pts[:,1] = np.clip(pts[:,1],0,h)
+            x0, y0 = pts.min(axis=0).tolist()
+            x1, y1 = pts.max(axis=0).tolist()
             if x1-x0 < 4 or y1-y0 < 4:
                 raise ValueError("tiny line")
             box = Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
@@ -119,7 +124,10 @@ def extract_text(page):
             label=str(block.get("block_label","text")).lower()
             if label in {"text","paragraph_title","title","doc_title","ocr","table_caption",
                          "figure_title","number","header","footer","reference","formula",
-                         "abstract","aside_text","footnote","seal"}:
+                         "abstract","aside_text","footnote","seal","image","figure"}:
+                if label in {"image","figure"} and (
+                    value.startswith("![") or value.startswith("<img") or "data:image" in value):
+                    continue
                 contents.append(value.strip())
         return "\n".join(contents).strip()
     # Versioned outputs may expose recognized text at the top level.
