@@ -177,7 +177,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
     settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
     engine = ocr_engine or settings.ocr_engine
-    if engine not in ("smart", "vl_local"):
+    if engine not in ("smart", "vl_local", "hybrid_local"):
         raise ValueError("Неизвестный движок OCR")
     settings.ocr_engine = engine
     if vl_device is not None:
@@ -206,15 +206,34 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
             warnings.append(
                 f"Не преобразовано областей: {len(details['skipped'])}. "
                 "Причины и координаты — в локальной диагностике")
-    elif engine == "smart":
+    elif engine in ("smart", "hybrid_local"):
         progress("Распознавание текста и таблиц (PaddleOCR / OpenCV)")
         project = local_ocr(source_project, settings, progress=progress)
+        _cancelled(cancelled)
+        if engine == "hybrid_local":
+            from .vl_hybrid import selective_vl
+            folder = (Path(vl_diagnostics) if vl_diagnostics is not None else
+                      data_dir() / "diagnostics" / "paddle-vl-hybrid" /
+                      f"{source.stem}-{uuid4().hex[:8]}")
+            # Fail open to the original OCR result, never leave the user
+            # without a PPTX because a *secondary* neural checker stalled.
+            try:
+                project, hybrid_warnings = selective_vl(
+                    project, source, settings, diagnostics_dir=folder,
+                    progress=progress, cancelled=cancelled)
+                warnings.extend(hybrid_warnings)
+            except ProcessingCancelled:
+                raise
+            except (RuntimeError, ValueError, OSError) as exc:
+                warnings.append("Локальная VL-проверка не выполнена "
+                                f"({type(exc).__name__}); сохранён обычный OCR")
+                _mark_uncertain(project, "Локальная VL-проверка не завершена")
     else:
         raise ValueError("Неизвестный движок OCR")
     _cancelled(cancelled)
 
-    if engine == "vl_local":
-        pass  # Never access the network/provider in local VL-only mode.
+    if engine in ("vl_local", "hybrid_local"):
+        pass  # No OpenRouter/network in local VL-only or local hybrid.
     elif consent and api_key:
         progress("Подготовка безопасной VL-группировки")
         try:
