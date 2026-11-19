@@ -101,12 +101,14 @@ def compare(base, variants):
     return top,"repeated_candidate_differs"
 
 
-def _substitute_if_safe(project, fragment, new_text):
+def _substitute_if_safe(project, fragment, new_text, *, verified_by_vl=False):
     """Only single-fragment editable objects/cells may be changed."""
     from .one_click import is_standalone_designation
     if is_standalone_designation(fragment.text) or is_standalone_designation(new_text):
         return False,"technical_code_not_modified"
-    safe,why=safe_change(fragment.text,new_text,fragment.confidence)
+    safe,why=safe_change(fragment.text,new_text,
+                         min(fragment.confidence,.59) if verified_by_vl
+                         else fragment.confidence)
     if not safe:
         return False,why
     owners=list(_owner_locations(project,fragment.id))
@@ -240,3 +242,146 @@ def disagreement_sample(project,report,limit=8):
     entries.sort(key=lambda r: (0 if suspicious(r["original"]) else 1,
                                 r["confidence"],r["bbox"][1]))
     return entries[:max(0,limit)]
+
+
+def ensemble_hybrid(project, source_path, settings, *, directory,
+                    progress=lambda _:None, cancelled=lambda:False,
+                    model_factory=None):
+    """Three-way *experimental* analysis: classic v5, compatible v6, batch VL.
+
+    Never call OpenRouter. A failed optional recognizer does not block PPTX.
+    High-confidence automatic changes require SAME answer from v6 and a
+    completely ID-validated VL batch, plus non-numeric character safeguards.
+    """
+    from .one_click import ProcessingCancelled
+    from .vl_hybrid import apply_suggestions
+    from .vl_tiled import run_isolated
+    directory=Path(directory)
+    directory.mkdir(parents=True,exist_ok=True)
+    warnings=[]
+    try:
+        project,report=run_ensemble(project,settings,directory,
+                                    progress=progress,cancelled=cancelled,
+                                    model_factory=model_factory)
+    except InterruptedError as exc:
+        raise ProcessingCancelled(str(exc)) from exc
+    except (RuntimeError, ValueError, OSError, ImportError) as exc:
+        warnings.append("Второй OCR недоступен ("+type(exc).__name__+
+                        "), сохранён результат PP-OCRv5")
+        project.raw["ocr_ensemble"]={"status":"failed","error_type":type(exc).__name__}
+        return project,warnings
+    summary={
+        "baseline_fragments":report["total_fragments"],
+        "second_ocr_readings":sum(1 for x in report["records"] if x["readings"]),
+        "ocr_disagreements":report["stats"].get("disagreements",0),
+        "models":report["models"],"model_warnings":report["warnings"],
+        "vl_batches_attempted":0,"vl_batches_verified":0,"vl_checked":0,
+        "vl_applied":0,"vl_review_only":0,
+        "baseline_requires_review":True,
+    }
+    warnings.extend(report["warnings"])
+    if not settings.ensemble_batch_vl or not settings.ensemble_max_batches:
+        project.raw["ocr_ensemble"].update(summary)
+        (directory/"ocr-ensemble-summary.json").write_text(
+            json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+        return project,warnings
+    limit=settings.ensemble_batch_size*settings.ensemble_max_batches
+    chosen=disagreement_sample(project,report,limit=limit)
+    if not chosen:
+        project.raw["ocr_ensemble"].update(summary)
+        (directory/"ocr-ensemble-summary.json").write_text(
+            json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+        return project,warnings
+    items=[{"id":x["id"],"bbox":x["bbox"],
+            "ocr_text":x["original"]} for x in chosen]
+    plan={"mode":"batch","version":1,"items":items,
+          "batch_size":settings.ensemble_batch_size,
+          "max_batches":settings.ensemble_max_batches}
+    (directory/"paddle-vl-hybrid-plan.json").write_text(
+        json.dumps(plan,ensure_ascii=False,indent=2),encoding="utf-8")
+    summary["vl_batches_attempted"]=(len(chosen)+settings.ensemble_batch_size-1)//settings.ensemble_batch_size
+    def check():
+        if cancelled():
+            raise ProcessingCancelled("Остановлено пользователем")
+    try:
+        progress(f"Пакетная VL: {len(chosen)} расхождений в "
+                 f"{summary['vl_batches_attempted']} изображениях")
+        run_isolated(source_path,settings,settings.vl_device,directory,
+                     progress=progress,check=check,hybrid=True,
+                     startup_timeout=settings.vl_startup_timeout_seconds)
+    except ProcessingCancelled:
+        raise
+    except (RuntimeError,ValueError,OSError) as exc:
+        warnings.append("Пакетная VL не завершена ("+type(exc).__name__+
+                        "); исходный OCR сохранён")
+        summary["vl_error_type"]=type(exc).__name__
+    # Only complete and fully verified batches have hybrid-<id>.json.
+    outcomes={}
+    batch_count=summary["vl_batches_attempted"]
+    for batch in range(batch_count):
+        path=directory/f"vl-batch-{batch:02d}.json"
+        if not path.exists():
+            continue
+        try:
+            batch_record=json.loads(path.read_text("utf-8"))
+        except (OSError,ValueError):
+            continue
+        if batch_record.get("status")!="complete":
+            continue
+        ids=batch_record.get("ids",[])
+        summary["vl_batches_verified"]+=1
+        for identifier in ids:
+            value=directory/f"hybrid-{identifier}.json"
+            if not value.exists():
+                continue
+            try:
+                response=json.loads(value.read_text("utf-8"))
+            except (OSError,ValueError):
+                continue
+            if response.get("status")=="ok":
+                outcomes[identifier]=response
+    if summary["vl_batches_verified"]<summary["vl_batches_attempted"]:
+        warnings.append("Часть пакетных ответов VL не содержит точного соответствия "
+                        "всех ID; такие результаты не применялись")
+    by_id={frag.id:frag for frag in project.fragments}
+    checks=[(by_id[entry["id"]],True) for entry in chosen
+            if entry["id"] in outcomes and entry["id"] in by_id]
+    vl_audit=apply_suggestions(project,checks,outcomes) if checks else []
+    report_by_id={x["id"]:x for x in report["records"]}
+    for item in vl_audit:
+        if item["decision"]!="review_only":
+            continue
+        record=report_by_id[item["ocr_id"]]
+        proposed=item["suggested"]
+        # Independent model consensus + full-ID VL agreement can overrule
+        # an overly confident old OCR, but only on low-risk non-code strings.
+        if proposed != record.get("consensus") or record.get("comparison")!="repeated_candidate_differs":
+            continue
+        fragment=by_id[item["ocr_id"]]
+        # hard floor for similarity; safe_change is reused with a capped
+        # confidence because this case has additional independent evidence.
+        from .vl_hybrid import safe_change
+        from .one_click import is_standalone_designation
+        if (is_standalone_designation(fragment.text) or
+                is_standalone_designation(proposed)):
+            continue
+        from difflib import SequenceMatcher
+        if SequenceMatcher(None,fragment.text.casefold(),proposed.casefold()).ratio()<.82:
+            continue
+        safe,why=safe_change(fragment.text,proposed,min(fragment.confidence,.59))
+        if not safe:
+            continue
+        applied,details=_substitute_if_safe(project,fragment,proposed,
+                                            verified_by_vl=True)
+        if applied:
+            item["decision"]="applied_by_v6_and_vl_review_required"
+            item["reason"]="independent_ocr_and_complete_vl_batch_agree"
+    summary["vl_checked"]=len(vl_audit)
+    summary["vl_applied"]=sum(x["decision"].startswith("applied") for x in vl_audit)
+    summary["vl_review_only"]=sum(x["decision"]=="review_only" for x in vl_audit)
+    (directory/"ocr-ensemble-vl-audit.json").write_text(
+        json.dumps(vl_audit,ensure_ascii=False,indent=2),encoding="utf-8")
+    project.raw["ocr_ensemble"].update(summary)
+    (directory/"ocr-ensemble-summary.json").write_text(
+        json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+    return project,warnings
