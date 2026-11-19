@@ -106,8 +106,12 @@ def process_detected(source, directory, device, settings, *,
         raise RuntimeError("TextDetection не обнаружил ни одной текстовой области")
     if len(regions) > settings.vl_max_regions and not benchmark:
         raise RuntimeError(
-            f"Обнаружено {len(regions)} строк при лимите {settings.vl_max_regions}. "
-            "См. paddle-vl-regions.json; нельзя молча пропускать надписи")
+            f"Найдено {len(regions)} текстовых областей при лимите "
+            f"{settings.vl_max_regions}. Полное VL-only распознавание "
+            "остановлено до загрузки тяжёлой модели, чтобы не запускать "
+            "многочасовое задание. Для CPU рекомендуются обычный Smart OCR "
+            "или выборочная VL-проверка; увеличение лимита само по себе "
+            "не ускорит распознавание. Координаты: paddle-vl-regions.json")
     if benchmark:
         # Keep benchmark representative but bounded: one confident, visible line.
         regions = [max(regions, key=lambda x: (x["score"],
