@@ -19,7 +19,18 @@ def contact_sheet(source: Image.Image, items: list[dict], *, width=840):
         raise ValueError("Пакет VL должен содержать 1–16 областей")
     sheet=Image.new("RGB",(width, 14 + len(items)*95),"white")
     pen=ImageDraw.Draw(sheet)
-    font=ImageFont.load_default()
+    font=None
+    for face in ("arial.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"):
+        try:
+            font=ImageFont.truetype(face,28)
+            break
+        except OSError:
+            continue
+    if font is None:
+        try:
+            font=ImageFont.load_default(size=24)
+        except TypeError:
+            font=ImageFont.load_default()
     for i,entry in enumerate(items,1):
         b=entry["bbox"]
         x0,y0,x1,y1=map(float,b)
