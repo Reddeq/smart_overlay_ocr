@@ -49,6 +49,12 @@ def main():
                      help="Apply conservative low-confidence OCR consensus (review still required)")
     one.add_argument("--vl-preflight", type=int, help="Maximum seconds for the first text line")
     one.add_argument("--vl-total-timeout", type=int, help="Overall local VL inference budget (seconds)")
+    quality = sub.add_parser("evaluate-ocr", help="Compare OCR ensemble with HUMAN-labeled reference CSV")
+    quality.add_argument("report", type=Path, help="ocr-ensemble.json from a hybrid run")
+    quality.add_argument("--make-template", type=Path,
+                         help="Create editable id,original,truth CSV instead of scoring")
+    quality.add_argument("--truth", type=Path, help="Completed human-labeled CSV")
+    quality.add_argument("--output", type=Path, help="Output JSON with CER and exact-match accuracy")
     bench = sub.add_parser("benchmark-vl", help="Local one-line PaddleOCR-VL benchmark, no PPTX")
     bench.add_argument("image", type=Path)
     bench.add_argument("--device", choices=["cpu","gpu:0"], default="cpu")
@@ -73,6 +79,19 @@ def main():
     if args.command == "editor":
         from .app import run_app
         return run_app()
+    if args.command == "evaluate-ocr":
+        import json
+        from .ocr_eval import truth_template, evaluate_csv
+        if args.make_template:
+            print(truth_template(args.report,args.make_template))
+            return 0
+        if not args.truth:
+            parser.error("Use --make-template CSV or --truth completed.csv")
+        result = evaluate_csv(args.report,args.truth,
+                              args.output or args.report.with_name("ocr-evaluation.json"))
+        print(json.dumps({k:v for k,v in result.items() if k not in ("note",)},
+                         ensure_ascii=False,indent=2))
+        return 0
     if args.command == "benchmark-vl":
         import json
         from uuid import uuid4
