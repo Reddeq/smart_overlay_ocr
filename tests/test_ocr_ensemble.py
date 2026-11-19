@@ -190,3 +190,29 @@ def test_ensemble_hybrid_uses_only_disagreements_for_vl(tmp_path,monkeypatch):
     assert (tmp_path/"ocr-ensemble-vl-audit.json").exists()
     assert result.raw["ocr_ensemble"]["vl_batches_verified"]==1
     assert result.objects[0].needs_review
+
+
+def test_human_truth_cer_eval_scores_actual_errors_not_pptx_exist(tmp_path):
+    import csv
+    from smart_overlay.ocr_eval import (edit_distance,truth_template,
+                                        evaluate_csv)
+    assert edit_distance("MAlN","MAIN")==1
+    report={"records":[
+        {"id":"ocr_1","original":"MAlN","consensus":"MAIN","final":"MAIN"},
+        {"id":"ocr_2","original":"Касета","consensus":None,"final":"Касета"},
+    ]}
+    path=tmp_path/"ocr-ensemble.json"
+    path.write_text(json.dumps(report,ensure_ascii=False),encoding="utf-8")
+    template=truth_template(path,tmp_path/"reference.csv")
+    assert template.exists()
+    with template.open("w",newline="",encoding="utf-8-sig") as stream:
+        writer=csv.writer(stream)
+        writer.writerow(["id","original","truth"])
+        writer.writerow(["ocr_1","MAlN","MAIN"])
+        writer.writerow(["ocr_2","Касета","Кассета"])
+    quality=evaluate_csv(path,template,tmp_path/"comparison.json")
+    assert quality["baseline_ppocrv5"]["exact_matches"]==0
+    assert quality["alternate_consensus"]["measured"]==1
+    assert quality["final_pptx"]["exact_matches"]==1
+    assert quality["baseline_ppocrv5"]["character_error_rate"] > (
+        quality["final_pptx"]["character_error_rate"])
