@@ -23,8 +23,11 @@ _LAT = re.compile(r"[A-Za-z]")
 
 
 def suspicious(text: str) -> bool:
-    """Very limited heuristics: ambiguous mixed writing remains reviewable."""
-    return any(c in text for c in REPLACEMENTS) or bool(_CYR.search(text) and _LAT.search(text))
+    """Flag malformed mixed-script *tokens*, not legitimate bilingual phrases."""
+    if any(c in text for c in REPLACEMENTS):
+        return True
+    return any(_CYR.search(token) and _LAT.search(token)
+               for token in text.split())
 
 
 def candidates(project: Project, settings: Settings, *, max_checks: int | None = None):
@@ -45,9 +48,10 @@ def candidates(project: Project, settings: Settings, *, max_checks: int | None =
         rows.append((frag, suspect))
     # Prioritize clearly damaged strings, then low-confidence ones. Never
     # try every detected line just because there are hundreds of them.
-    rows.sort(key=lambda entry: (0 if any(c in entry[0].text for c in REPLACEMENTS)
-                                 else 1 if entry[1] else 2,
-                                 entry[0].confidence, entry[0].bbox.y))
+    rows.sort(key=lambda entry: (
+        0 if any(c in entry[0].text for c in REPLACEMENTS) else
+        1 if entry[0].confidence < settings.hybrid_confidence else 2,
+        entry[0].confidence, entry[0].bbox.y))
     return rows[:limit], len(rows)
 
 
