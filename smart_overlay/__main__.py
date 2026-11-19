@@ -36,6 +36,17 @@ def main():
     one.add_argument("--vl-tile-timeout", type=int, help="Timeout for each VL tile, seconds")
     one.add_argument("--vl-max-new-tokens", type=int, help="Maximum VL output tokens per tile")
     one.add_argument("--vl-max-tiles", type=int, help="Limit number of VL tiles")
+    one.add_argument("--vl-strategy", choices=["detect","tiles"],
+                     help="detect: text lines only (default); tiles: legacy document layout")
+    one.add_argument("--vl-max-regions", type=int, help="Maximum text lines for local VL")
+    one.add_argument("--vl-preflight", type=int, help="Maximum seconds for the first text line")
+    one.add_argument("--vl-total-timeout", type=int, help="Overall local VL inference budget (seconds)")
+    bench = sub.add_parser("benchmark-vl", help="Local one-line PaddleOCR-VL benchmark, no PPTX")
+    bench.add_argument("image", type=Path)
+    bench.add_argument("--device", choices=["cpu","gpu:0"], default="cpu")
+    bench.add_argument("--timeout", type=int, default=60,
+                       help="Hard limit for one text-line inference in seconds")
+    bench.add_argument("--output", type=Path, help="Local diagnostics directory")
     sub.add_parser("editor", help="Open the legacy correction editor")
     export = sub.add_parser("export", help="Export an already reviewed project without OCR")
     export.add_argument("project", type=Path)
@@ -54,6 +65,26 @@ def main():
     if args.command == "editor":
         from .app import run_app
         return run_app()
+    if args.command == "benchmark-vl":
+        import json
+        from uuid import uuid4
+        from .settings import data_dir
+        from .vl_tiled import run_isolated
+        settings = Settings(vl_strategy="detect",
+                            vl_region_timeout_seconds=args.timeout,
+                            vl_preflight_seconds=args.timeout)
+        directory = (args.output if args.output else
+                     data_dir() / "diagnostics" / "paddle-vl-benchmark"
+                     / f"{args.image.stem}-{uuid4().hex[:8]}")
+        result, _ = run_isolated(
+            args.image, settings, args.device, directory,
+            progress=print, check=lambda: None,
+            tile_timeout=args.timeout,
+            startup_timeout=settings.vl_startup_timeout_seconds,
+            benchmark=True)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print("Локальный отчёт: " + str(directory))
+        return 0
     if args.command == "convert":
         from .one_click import convert_drawing
         if args.smart and args.ocr_engine == "vl_local":
@@ -72,7 +103,11 @@ def main():
         overrides = {"vl_tile_size": args.vl_tile_size,
                      "vl_tile_timeout_seconds": args.vl_tile_timeout,
                      "vl_max_new_tokens": args.vl_max_new_tokens,
-                     "vl_max_tiles": args.vl_max_tiles}
+                     "vl_max_tiles": args.vl_max_tiles,
+                     "vl_strategy": args.vl_strategy,
+                     "vl_max_regions": args.vl_max_regions,
+                     "vl_preflight_seconds": args.vl_preflight,
+                     "vl_total_timeout_seconds": args.vl_total_timeout}
         if any(v is not None for v in overrides.values()):
             settings = Settings.model_validate({
                 **settings.model_dump(),
