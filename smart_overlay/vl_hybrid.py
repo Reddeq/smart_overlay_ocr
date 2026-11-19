@@ -60,7 +60,7 @@ def safe_change(old: str, suggestion: str, confidence: float) -> tuple[bool, str
         return False, "unchanged"
     if "\n" in suggestion and "\n" not in old:
         return False, "unexpected_multiline"
-    if len(suggestion) > 240 or len(suggestion) / max(1,len(old)) not in () and not (
+    if len(suggestion) > 240 or not (
         .65 <= len(suggestion)/max(1,len(old)) <= 1.6):
         return False, "length_mismatch"
     if _DIGITS.findall(old) != _DIGITS.findall(suggestion):
