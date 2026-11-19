@@ -399,13 +399,17 @@ def local_vl_ocr(source: Project, settings, *, device="cpu", pipeline_factory=No
         except (LocalVLError, ValueError) as exc:
             save_diagnostics(folder, page, source=source, error=exc)
             raise LocalVLError(f"{exc} Диагностика: {folder.resolve()}") from exc
-        project.raw["local_vl"]["tiling"] = tile_summary
+        project.raw["local_vl"]["processing"] = tile_summary
         project.raw["local_vl"]["device"] = device
         project.usage.append({"stage": "paddle_vl_local",
                               "seconds": round(time.monotonic()-begin, 3)})
-        if tile_summary["seam_skips"]:
+        if tile_summary.get("seam_skips"):
             project.messages.append("VL: некоторые блоки пропущены на границах участков; "
                                     "проверьте диагностическую разметку")
+        if tile_summary.get("unreadable"):
+            project.messages.append(
+                f"VL: не удалось прочитать {len(tile_summary['unreadable'])} "
+                "детектированных строк; они остались на исходном растре")
         save_diagnostics(folder, page, project)
         return project
     progress("PaddleOCR-VL-1.6: загрузка локальных моделей")
