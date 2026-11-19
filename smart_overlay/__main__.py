@@ -32,6 +32,10 @@ def main():
                      help="PaddleOCR-VL runtime device; CPU is the safe default")
     one.add_argument("--vl-diagnostics", type=Path,
                      help="Save confidential local VL parsing JSON and a box overlay in this directory")
+    one.add_argument("--vl-tile-size", type=int, help="Local VL tile side in pixels (384–2048)")
+    one.add_argument("--vl-tile-timeout", type=int, help="Timeout for each VL tile, seconds")
+    one.add_argument("--vl-max-new-tokens", type=int, help="Maximum VL output tokens per tile")
+    one.add_argument("--vl-max-tiles", type=int, help="Limit number of VL tiles")
     sub.add_parser("editor", help="Open the legacy correction editor")
     export = sub.add_parser("export", help="Export an already reviewed project without OCR")
     export.add_argument("project", type=Path)
@@ -65,6 +69,14 @@ def main():
             settings = Settings.model_validate({**settings.model_dump(),
                 "ocr_version": "PP-OCRv5", "ocr_language_mode": "manual",
                 "ocr_languages": codes})
+        overrides = {"vl_tile_size": args.vl_tile_size,
+                     "vl_tile_timeout_seconds": args.vl_tile_timeout,
+                     "vl_max_new_tokens": args.vl_max_new_tokens,
+                     "vl_max_tiles": args.vl_max_tiles}
+        if any(v is not None for v in overrides.values()):
+            settings = Settings.model_validate({
+                **settings.model_dump(),
+                **{k: v for k, v in overrides.items() if v is not None}})
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
                                  consent=args.smart and args.consent_api, proxy=args.proxy,
