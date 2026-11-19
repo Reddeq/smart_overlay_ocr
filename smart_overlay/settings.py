@@ -12,6 +12,12 @@ from .models import Model
 class Settings(Model):
     ocr_engine: Literal["smart", "vl_local"] = "smart"
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
+    vl_tile_size: int = Field(default=896, ge=384, le=2048)
+    vl_tile_overlap: int = Field(default=96, ge=0, le=512)
+    vl_max_tiles: int = Field(default=64, ge=1, le=512)
+    vl_max_new_tokens: int = Field(default=384, ge=64, le=2048)
+    vl_tile_timeout_seconds: int = Field(default=180, ge=30, le=1800)
+    vl_startup_timeout_seconds: int = Field(default=300, ge=30, le=1800)
     language: str = "en"  # compatibility with the old single-language editor/CLI
     ocr_language_mode: Literal["single", "auto", "manual"] = "single"
     ocr_languages: list[str] = Field(default_factory=list)
@@ -35,6 +41,8 @@ class Settings(Model):
 
     @model_validator(mode="after")
     def valid(self):
+        if self.vl_tile_overlap * 2 >= self.vl_tile_size:
+            raise ValueError("Перекрытие VL должно быть меньше половины размера участка")
         if self.ocr_language_mode != "single":
             if self.ocr_version != "PP-OCRv5":
                 raise ValueError("Автоопределение и языковые наборы требуют PP-OCRv5")
