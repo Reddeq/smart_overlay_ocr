@@ -187,9 +187,12 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     grouping_requests = table_requests = 0
     if engine == "vl_local":
         from .vl_local import local_vl_ocr
+        run_dir = (Path(vl_diagnostics) if vl_diagnostics is not None else
+                   data_dir() / "diagnostics" / "paddle-vl" /
+                   f"{source.stem}-{uuid4().hex[:8]}")
         project = local_vl_ocr(
             source_project, settings, device=settings.vl_device,
-            diagnostics_dir=vl_diagnostics,
+            diagnostics_dir=run_dir, input_path=source,
             progress=progress, check=lambda: _cancelled(cancelled))
         warnings.append("Экспериментальный локальный PaddleOCR-VL: "
                         "проверьте геометрию фреймов и структуру таблиц")
