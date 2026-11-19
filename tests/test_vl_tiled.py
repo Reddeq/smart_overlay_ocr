@@ -98,3 +98,62 @@ def test_worker_saves_manifest_and_each_tile_before_completion(tmp_path):
     assert all(c[1]["max_new_tokens"]==settings.vl_max_new_tokens for c in fake.calls)
     for file in out.glob("tile-*.json"):
         assert json.loads(file.read_text("utf-8"))["status"] in ("ok","skipped_blank")
+
+
+def test_isolated_worker_hard_timeout_kills_child_without_model(monkeypatch,tmp_path):
+    import subprocess
+    import sys
+    from smart_overlay import vl_tiled
+    from smart_overlay.vl_local import LocalVLError
+    original_popen = subprocess.Popen
+    children = []
+
+    def fake_popen(command, **kwargs):
+        child = original_popen([
+            sys.executable, "-u", "-c",
+            "import json,time; print(json.dumps({'event':'tile','index':0,'total':1}),"
+            "flush=True); time.sleep(30)"
+        ], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(vl_tiled.subprocess, "Popen", fake_popen)
+    with pytest.raises(LocalVLError, match="Истекло время"):
+        vl_tiled.run_isolated(
+            tmp_path/"not-used.png", Settings(), "cpu", tmp_path/"diag",
+            progress=lambda _:None, check=lambda:None,
+            tile_timeout=.5, startup_timeout=5)
+    assert children and children[0].poll() is not None
+    report=json.loads((tmp_path/"diag"/"paddle-vl-progress.json").read_text("utf-8"))
+    assert report["status"]=="failed"
+
+
+def test_isolated_worker_cancellation_kills_child_without_model(monkeypatch,tmp_path):
+    import subprocess
+    import sys
+    from smart_overlay import vl_tiled
+    original_popen = subprocess.Popen
+    children = []
+
+    def fake_popen(command, **kwargs):
+        child = original_popen([
+            sys.executable, "-u", "-c",
+            "import json,time; print(json.dumps({'event':'tile','index':0,'total':1}),"
+            "flush=True); time.sleep(30)"
+        ], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(vl_tiled.subprocess, "Popen", fake_popen)
+    calls = [0]
+    def cancel():
+        calls[0] += 1
+        if calls[0] > 4:
+            raise RuntimeError("simulated cancellation")
+
+    with pytest.raises(RuntimeError, match="simulated cancellation"):
+        vl_tiled.run_isolated(
+            tmp_path/"not-used.png", Settings(), "cpu", tmp_path/"diag",
+            progress=lambda _:None, check=cancel,
+            tile_timeout=5, startup_timeout=5)
+    assert children and children[0].poll() is not None
