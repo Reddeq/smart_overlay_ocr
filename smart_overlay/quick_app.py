@@ -226,7 +226,7 @@ class QuickWindow(QMainWindow):
         mode_row.addWidget(QLabel("Способ распознавания:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Smart OCR · обычный", "smart")
-        self.mode_combo.addItem("Smart OCR + локальная VL-проверка", "hybrid_local")
+        self.mode_combo.addItem("Smart OCR · два распознавателя + VL", "hybrid_local")
         self.mode_combo.addItem("PaddleOCR-VL 1.6 · целиком (эксперимент)", "vl_local")
         engine_index = self.mode_combo.findData(self.settings.ocr_engine)
         self.mode_combo.setCurrentIndex(max(0, engine_index))
@@ -294,7 +294,7 @@ class QuickWindow(QMainWindow):
         self.device_combo.setEnabled(local and self.worker is None)
         self.device_combo.setVisible(local)
         self.statusBar().showMessage(
-            "Гибрид: обычное OCR + до 3 локальных VL-проверок; никаких облачных запросов"
+            "Гибрид: PP-OCRv5 + совместимые модели PP-OCRv6, затем пакетная VL-проверка; без облака"
             if engine == "hybrid_local" else
             "VL полностью локальный: экспериментальный режим для небольших листов"
             if engine == "vl_local" else "Smart OCR готов")
