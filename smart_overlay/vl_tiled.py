@@ -158,6 +158,11 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
     active_tile = None
     completed_count = 0
     strategy = "hybrid" if hybrid else ("detect" if benchmark else settings.vl_strategy)
+    hybrid_batch = bool(hybrid and settings.ensemble_enabled and settings.ensemble_batch_vl)
+    def hybrid_budget(first=False):
+        return (settings.ensemble_batch_timeout if hybrid_batch
+                else settings.vl_preflight_seconds if first
+                else settings.vl_region_timeout_seconds)
     stage = "starting"
     def checkpoint_status(status, **details):
         payload = {"status": status, "strategy": strategy,
@@ -221,8 +226,9 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                 elif name == "started":
                     stage = "модель загружена"
                     overall_deadline = time.monotonic() + settings.vl_total_timeout_seconds
-                    deadline = time.monotonic() + (settings.vl_region_timeout_seconds
-                              if strategy in ("detect", "hybrid") else tile_timeout)
+                    deadline = time.monotonic() + (hybrid_budget()
+                              if strategy=="hybrid" else settings.vl_region_timeout_seconds
+                              if strategy=="detect" else tile_timeout)
                     checkpoint_status("model_ready", total_regions=event["total"],
                                       model_load_seconds=event.get("model_load_seconds"))
                     progress(f"VL: модель загружена, ожидается {event['total']} распознаваний")
@@ -230,9 +236,11 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                     active_tile = int(event["index"])
                     stage = "распознавание"
                     if strategy in ("detect", "hybrid"):
-                        budget = (settings.vl_preflight_seconds if
-                                  completed_count == 0 else settings.vl_region_timeout_seconds)
-                        deadline = time.monotonic() + min(budget,settings.vl_region_timeout_seconds)
+                        budget = (hybrid_budget(first=completed_count==0) if strategy=="hybrid"
+                                  else settings.vl_preflight_seconds if completed_count==0
+                                  else settings.vl_region_timeout_seconds)
+                        deadline = time.monotonic() + (budget if strategy=="hybrid"
+                                                     else min(budget,settings.vl_region_timeout_seconds))
                     else:
                         deadline = time.monotonic() + tile_timeout
                     checkpoint_status("running_region" if strategy in ("detect", "hybrid") else "running_tile",
