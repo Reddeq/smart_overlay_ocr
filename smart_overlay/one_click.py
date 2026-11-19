@@ -197,6 +197,11 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         warnings.append("Экспериментальный локальный PaddleOCR-VL: "
                         "проверьте геометрию фреймов и структуру таблиц")
         details = project.raw.get("local_vl", {})
+        unreadable = details.get("processing", {}).get("unreadable", [])
+        if unreadable:
+            warnings.append(
+                f"VL не прочитала {len(unreadable)} детектированных строк: "
+                "оригинал сохранён, подробности в диагностике")
         if details.get("skipped"):
             warnings.append(
                 f"Не преобразовано областей: {len(details['skipped'])}. "
