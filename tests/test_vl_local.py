@@ -135,9 +135,12 @@ def test_one_click_vl_mode_cannot_contact_openrouter(drawing, monkeypatch, tmp_p
                         lambda *a, **kw: pytest.fail("Classic PaddleOCR must not run"))
     monkeypatch.setattr("smart_overlay.one_click._smart",
                         lambda *a, **kw: pytest.fail("OpenRouter must not run"))
-    pipeline = MockLocalPipeline(page(text_box()))
-    monkeypatch.setattr("smart_overlay.vl_local.default_pipeline",
-                        lambda *, device: pipeline)
+    calls = []
+    def isolated(source_path, settings, device, diagnostics_dir, **kwargs):
+        calls.append((Path(source_path), device))
+        return page(text_box()), {"tiles": 1, "finished": 1,
+                                  "missing_or_failed": [], "seam_skips": [], "blocks": 1}
+    monkeypatch.setattr("smart_overlay.vl_tiled.run_isolated", isolated)
     monkeypatch.setattr("smart_overlay.one_click.data_dir", lambda: tmp_path/"userdata")
     exports = []
 
@@ -154,14 +157,16 @@ def test_one_click_vl_mode_cannot_contact_openrouter(drawing, monkeypatch, tmp_p
     assert len(exports) == 1
     assert result.pptx.read_bytes() == b"PPTX mock"
     assert result.needs_review >= 1
-    assert len(pipeline.calls) == 1
+    assert calls == [(path.resolve(), "cpu")]
     assert result.project_file.exists()
 
 
 def test_model_failure_never_creates_empty_pptx(drawing, monkeypatch, tmp_path):
     _, path = drawing
-    monkeypatch.setattr("smart_overlay.vl_local.default_pipeline",
-                        lambda *, device: MockLocalPipeline(page()))
+    monkeypatch.setattr("smart_overlay.vl_tiled.run_isolated",
+                        lambda *args, **kwargs: (
+                            page(), {"tiles": 1, "finished": 1,
+                                     "missing_or_failed": [], "seam_skips": [], "blocks": 0}))
     monkeypatch.setattr("smart_overlay.one_click.export_pptx",
                         lambda *a, **k: pytest.fail("Must not export empty layout"))
     with pytest.raises(LocalVLError, match="Нет пригодных"):
