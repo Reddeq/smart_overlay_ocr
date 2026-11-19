@@ -11,6 +11,7 @@ from collections import Counter
 from html import unescape
 import json
 import math
+import os
 from pathlib import Path
 import re
 import time
@@ -57,6 +58,7 @@ def default_pipeline(*, device: str):
             pipeline_version=VERSION,
             engine="paddle",
             device=device,
+            cpu_threads=max(2, min(12, os.cpu_count() or 4)),
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_layout_detection=True,
@@ -350,10 +352,39 @@ def save_diagnostics(directory, page, project=None, *, source=None, error=None):
     preview.save(directory / "paddle-vl-boxes.png")
 
 def local_vl_ocr(source: Project, settings, *, device="cpu", pipeline_factory=None,
-                 diagnostics_dir=None, progress=lambda _: None, check=lambda: None):
+                 diagnostics_dir=None, input_path=None,
+                 progress=lambda _: None, check=lambda: None):
     """Run the full on-device VL pipeline, without reading any PaddleOCR text."""
     check()
     begin = time.monotonic()
+    if input_path is not None:
+        # Production path: interruptible worker process, immediate per-tile
+        # checkpoints, hard per-tile timeout. Never silently fall back to
+        # full-page inference if an isolated run fails.
+        from .vl_tiled import run_isolated
+        folder = Path(diagnostics_dir) if diagnostics_dir else (
+            Path.home() / ".local-vl-diagnostics" / str(int(time.time())))
+        progress("PaddleOCR-VL: запуск отдельного процесса")
+        page, tile_summary = run_isolated(
+            input_path, settings, device, folder, progress=progress, check=check,
+            tile_timeout=settings.vl_tile_timeout_seconds,
+            startup_timeout=settings.vl_startup_timeout_seconds)
+        check()
+        progress("PaddleOCR-VL: объединение областей в координатах исходника")
+        try:
+            project = parse_page(source, settings, page)
+        except (LocalVLError, ValueError) as exc:
+            save_diagnostics(folder, page, source=source, error=exc)
+            raise LocalVLError(f"{exc} Диагностика: {folder.resolve()}") from exc
+        project.raw["local_vl"]["tiling"] = tile_summary
+        project.raw["local_vl"]["device"] = device
+        project.usage.append({"stage": "paddle_vl_local",
+                              "seconds": round(time.monotonic()-begin, 3)})
+        if tile_summary["seam_skips"]:
+            project.messages.append("VL: некоторые блоки пропущены на границах участков; "
+                                    "проверьте диагностическую разметку")
+        save_diagnostics(folder, page, project)
+        return project
     progress("PaddleOCR-VL-1.6: загрузка локальных моделей")
     factory = pipeline_factory or default_pipeline
     pipeline = factory(device=device)
