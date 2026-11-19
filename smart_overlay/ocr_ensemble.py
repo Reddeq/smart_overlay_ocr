@@ -224,6 +224,9 @@ def run_ensemble(project, settings, directory, *,
     overview["records"]=list(records.values())
     overview["stats"]=evaluate_candidates(project,overview["records"],
                                            apply=settings.ensemble_apply_consensus)
+    after={f.id:f.text for f in project.fragments}
+    for entry in overview["records"]:
+        entry["final"]=after[entry["id"]]
     overview["elapsed_seconds"]=round(time.monotonic()-start,3)
     (directory/"ocr-ensemble.json").write_text(
         json.dumps(overview,ensure_ascii=False,indent=2),encoding="utf-8")
@@ -382,6 +385,11 @@ def ensemble_hybrid(project, source_path, settings, *, directory,
     (directory/"ocr-ensemble-vl-audit.json").write_text(
         json.dumps(vl_audit,ensure_ascii=False,indent=2),encoding="utf-8")
     project.raw["ocr_ensemble"].update(summary)
+    actual={fragment.id:fragment.text for fragment in project.fragments}
+    for entry in report["records"]:
+        entry["final"]=actual.get(entry["id"],entry["original"])
+    (directory/"ocr-ensemble.json").write_text(
+        json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
     (directory/"ocr-ensemble-summary.json").write_text(
         json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
     return project,warnings
