@@ -12,6 +12,11 @@ from .models import Model
 class Settings(Model):
     ocr_engine: Literal["smart", "vl_local"] = "smart"
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
+    vl_strategy: Literal["detect", "tiles"] = "detect"
+    vl_max_regions: int = Field(default=80, ge=1, le=1000)
+    vl_region_timeout_seconds: int = Field(default=60, ge=10, le=1800)
+    vl_preflight_seconds: int = Field(default=45, ge=10, le=1800)
+    vl_total_timeout_seconds: int = Field(default=480, ge=30, le=7200)
     vl_tile_size: int = Field(default=896, ge=384, le=2048)
     vl_tile_overlap: int = Field(default=96, ge=0, le=512)
     vl_max_tiles: int = Field(default=64, ge=1, le=512)
