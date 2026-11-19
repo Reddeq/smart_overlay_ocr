@@ -14,7 +14,7 @@ from smart_overlay.models import Cell, Table
 from smart_overlay.one_click import convert_drawing
 from smart_overlay.settings import Settings
 from smart_overlay.structure import validate_project
-from smart_overlay.vl_hybrid import candidates, safe_change, apply_suggestions, selective_vl
+from smart_overlay.vl_hybrid import candidates, safe_change, apply_suggestions, selective_vl, suspicious
 from smart_overlay.vl_worker import process_hybrid
 
 
@@ -26,6 +26,13 @@ def sample():
     project.objects[0].confidence = .31
     project.fragments[1].confidence = .68
     return project
+
+
+def test_valid_bilingual_phrase_is_not_mistaken_for_mixed_script_garbage():
+    assert not suspicious("Вилка D38999/26WA35PN")
+    assert not suspicious("POWER SUPPLY")
+    assert suspicious("КОНТРOЛЬ")
+    assert suspicious("Микросхема �")
 
 
 def test_only_selected_suspicious_labels_are_checked():
