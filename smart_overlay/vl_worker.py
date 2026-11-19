@@ -14,6 +14,7 @@ import traceback
 
 import cv2
 import numpy as np
+from PIL import ImageDraw
 
 from .input import load_image, source_image
 from .settings import Settings
@@ -92,6 +93,14 @@ def process_detected(source, directory, device, settings, *,
                 "limits": {"max_regions": settings.vl_max_regions,
                            "max_new_tokens": min(128, settings.vl_max_new_tokens)}}
     write_json(directory / "paddle-vl-regions.json", manifest)
+    # Persist detection visualization before the expensive VLM is loaded:
+    # a timeout then still leaves usable evidence of text geometry.
+    preview = source.copy()
+    overlay = ImageDraw.Draw(preview)
+    for region in regions:
+        overlay.polygon([tuple(pt) for pt in region["polygon"]],
+                        outline="#0088ff", width=2)
+    preview.save(directory / "paddle-vl-detected.png")
     emit("detected", total=len(regions), detector_seconds=round(detected-start, 2))
     if not regions:
         raise RuntimeError("TextDetection не обнаружил ни одной текстовой области")
