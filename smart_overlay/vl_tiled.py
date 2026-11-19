@@ -188,7 +188,10 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                         break
                     continue
                 name = event.get("event")
-                if name == "started":
+                if name == "loading":
+                    checkpoint_status("loading_model", total_tiles=event["total"])
+                    progress(f"VL: подготовлено {event['total']} участков; загружаю модель…")
+                elif name == "started":
                     deadline = time.monotonic() + tile_timeout
                     checkpoint_status("model_ready", total_tiles=event["total"])
                     progress(f"VL: модель загружена, запланировано участков: {event['total']}")
