@@ -178,6 +178,62 @@ def process_detected(source, directory, device, settings, *,
 
 
 
+
+def process_hybrid_batch(source, directory, device, settings, *, pipeline_factory=None):
+    """One VLM call per numbered contact sheet; reject incomplete ID coverage.
+
+    A batch is an experiment, not an API guarantee. Failure only leaves a raw
+    checkpoint for manual inspection; never maps guessed text to wrong shapes.
+    """
+    from .vl_batch import contact_sheet,parse_vl_result
+    from .vl_local import _as_plain_dict, _native_json
+    factory = pipeline_factory or default_pipeline
+    plan=json.loads((directory/"paddle-vl-hybrid-plan.json").read_text("utf-8"))
+    entries=plan.get("items",[])
+    size=settings.ensemble_batch_size
+    if not entries:
+        emit("complete",total=0)
+        return
+    if len(entries)>size*settings.ensemble_max_batches:
+        raise ValueError("VL batch plan exceeds authorized call limit")
+    count=(len(entries)+size-1)//size
+    emit("loading",total=count)
+    stamp=time.monotonic()
+    model=factory(device=device,layout=False)
+    emit("started",total=count,model_load_seconds=round(time.monotonic()-stamp,2))
+    for batch_id,start in enumerate(range(0,len(entries),size)):
+        group=entries[start:start+size]
+        emit("region",index=batch_id,total=count)
+        begun=time.monotonic()
+        contact=contact_sheet(source,group)
+        contact.save(directory/f"vl-batch-{batch_id:02d}.png")
+        bgr=cv2.cvtColor(np.asarray(contact),cv2.COLOR_RGB2BGR)
+        responses=list(model.predict(
+            input=bgr,use_layout_detection=False,
+            prompt_label="ocr",format_block_content=False,
+            max_new_tokens=min(settings.vl_max_new_tokens,512)))
+        if len(responses)!=1:
+            raise RuntimeError("Batch VL: one output image must produce one result")
+        page=_native_json(_as_plain_dict(responses[0]))
+        mapped,reason=parse_vl_result(page,len(group))
+        complete=reason=="complete" and len(mapped)==len(group)
+        record={"status":"complete" if complete else "unverified",
+                "reason":reason,"ids":[x["id"] for x in group],
+                "parsed":mapped if complete else {},
+                "seconds":round(time.monotonic()-begun,3),"raw":page}
+        write_json(directory/f"vl-batch-{batch_id:02d}.json",record)
+        if complete:
+            for number,item in enumerate(group,1):
+                identifier=item["id"]
+                if not isinstance(identifier,str) or not re.fullmatch(r"[A-Za-z0-9_-]+",identifier):
+                    raise ValueError("Unsafe OCR ID in batch")
+                write_json(directory/f"hybrid-{identifier}.json",
+                           {"status":"ok","ocr_id":identifier,"text":mapped[number],
+                            "seconds":record["seconds"],"batch":batch_id})
+        emit("checkpoint",done=batch_id+1,total=count,
+             seconds=record["seconds"],verified=complete)
+    emit("complete",total=count)
+
 def process_hybrid(source, directory, device, settings, *, pipeline_factory=None):
     """Read *only* a selected list of existing OCR bboxes (no new detector)."""
     import re
@@ -185,6 +241,9 @@ def process_hybrid(source, directory, device, settings, *, pipeline_factory=None
     from .vl_local import _as_plain_dict, _native_json
     pipeline_factory = pipeline_factory or default_pipeline
     manifest = json.loads((directory/"paddle-vl-hybrid-plan.json").read_text("utf-8"))
+    if manifest.get("mode")=="batch":
+        return process_hybrid_batch(source,directory,device,settings,
+                                    pipeline_factory=pipeline_factory)
     entries = manifest.get("items", [])
     if len(entries) > settings.hybrid_max_checks:
         raise RuntimeError("Запрошено больше VL-проверок, чем разрешено настройками")
