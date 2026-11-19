@@ -272,7 +272,12 @@ def parse_page(source: Project, settings, page: dict):
     if page.get("_vl_detector_geometry") and result.fragments:
         # A detector/VLM pair still uses the same local OpenCV table geometry
         # as the classic pipeline, without reading any conventional OCR text.
-        geometric = geometric_tables(original, result.fragments, [])
+        try:
+            geometric = geometric_tables(original, result.fragments, [])
+        except (cv2.error, ValueError) as exc:
+            issues.append("OpenCV: сетки таблиц не восстановлены "
+                          f"({type(exc).__name__})")
+            geometric = []
         used = {i for table in geometric for i in table.ocr_ids}
         result.objects = [
             obj for obj in result.objects
