@@ -189,7 +189,7 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                 now = time.monotonic()
                 if now > deadline or (overall_deadline is not None and now > overall_deadline):
                     if active_tile is not None:
-                        where = f"{'строка' if strategy in ("detect", "hybrid") else 'участок'} {active_tile+1}"
+                        where = f"{'строка' if strategy in ('detect', 'hybrid') else 'участок'} {active_tile+1}"
                     else:
                         where = stage
                     raise LocalVLError(
@@ -237,14 +237,14 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                         deadline = time.monotonic() + tile_timeout
                     checkpoint_status("running_region" if strategy in ("detect", "hybrid") else "running_tile",
                                       total_regions=event["total"])
-                    progress(f"VL: {'строка' if strategy in ("detect", "hybrid") else 'участок'} "
+                    progress(f"VL: {'строка' if strategy in ('detect', 'hybrid') else 'участок'} "
                              f"{active_tile+1}/{event['total']}…")
                 elif name == "checkpoint":
                     completed_count = int(event["done"])
                     active_tile = None
                     deadline = time.monotonic() + (settings.vl_region_timeout_seconds
                               if strategy in ("detect", "hybrid") else tile_timeout)
-                    checkpoint_status("region_completed" if strategy=="detect" else "tile_completed",
+                    checkpoint_status("region_completed" if strategy in ("detect","hybrid") else "tile_completed",
                                       total_regions=event["total"],
                                       inference_seconds=event.get("seconds"))
                     progress(f"VL: сохранено {event['done']}/{event['total']} "
