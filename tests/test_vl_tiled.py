@@ -87,7 +87,7 @@ def test_worker_saves_manifest_and_each_tile_before_completion(tmp_path):
     ImageDraw.Draw(image).rectangle((650,300,800,320),fill="black")
     image.save(source)
     fake=FakePipeline()
-    settings=Settings(vl_tile_size=640,vl_tile_overlap=64)
+    settings=Settings(vl_strategy="tiles",vl_tile_size=640,vl_tile_overlap=64)
     out=tmp_path/"diagnostics"
     process(source,out,"cpu",settings,pipeline_factory=lambda *,device:fake)
     assert (out/"paddle-vl-tiles.json").exists()
@@ -120,7 +120,7 @@ def test_isolated_worker_hard_timeout_kills_child_without_model(monkeypatch,tmp_
     monkeypatch.setattr(vl_tiled.subprocess, "Popen", fake_popen)
     with pytest.raises(LocalVLError, match="Истекло время"):
         vl_tiled.run_isolated(
-            tmp_path/"not-used.png", Settings(), "cpu", tmp_path/"diag",
+            tmp_path/"not-used.png", Settings(vl_strategy="tiles"), "cpu", tmp_path/"diag",
             progress=lambda _:None, check=lambda:None,
             tile_timeout=.5, startup_timeout=5)
     assert children and children[0].poll() is not None
