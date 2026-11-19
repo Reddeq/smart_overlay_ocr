@@ -177,13 +177,67 @@ def process_detected(source, directory, device, settings, *,
     emit("complete", total=count, recognized=recognized, unreadable=unreadable)
 
 
+
+def process_hybrid(source, directory, device, settings, *, pipeline_factory=None):
+    """Read *only* a selected list of existing OCR bboxes (no new detector)."""
+    import re
+    from .vl_detect import extract_text
+    from .vl_local import _as_plain_dict, _native_json
+    pipeline_factory = pipeline_factory or default_pipeline
+    manifest = json.loads((directory/"paddle-vl-hybrid-plan.json").read_text("utf-8"))
+    entries = manifest.get("items", [])
+    if len(entries) > settings.hybrid_max_checks:
+        raise RuntimeError("Запрошено больше VL-проверок, чем разрешено настройками")
+    if not entries:
+        emit("complete", total=0)
+        return
+    emit("loading", total=len(entries))
+    stamp = time.monotonic()
+    pipeline = pipeline_factory(device=device, layout=False)
+    emit("started", total=len(entries), model_load_seconds=round(time.monotonic()-stamp,2))
+    for n, entry in enumerate(entries):
+        identifier = entry["id"]
+        if not isinstance(identifier,str) or not re.fullmatch(r"[A-Za-z0-9_-]+",identifier):
+            raise ValueError("Некорректный OCR ID для локального VL")
+        bounds = entry.get("bbox")
+        if not isinstance(bounds,list) or len(bounds)!=4:
+            raise ValueError("Некорректные координаты OCR")
+        x0,y0,x1,y1 = (float(v) for v in bounds)
+        left,top = max(0,int(x0)-8),max(0,int(y0)-8)
+        right,bottom = min(source.width,int(np.ceil(x1))+8),min(source.height,int(np.ceil(y1))+8)
+        if right<=left or bottom<=top:
+            raise ValueError("Пустая область OCR")
+        emit("region", index=n, total=len(entries), region_id=identifier)
+        started=time.monotonic()
+        crop=source.crop((left,top,right,bottom))
+        bgr=cv2.cvtColor(np.asarray(crop),cv2.COLOR_RGB2BGR)
+        response=list(pipeline.predict(
+            input=bgr,use_layout_detection=False,
+            prompt_label="ocr",format_block_content=False,
+            max_new_tokens=min(96,settings.vl_max_new_tokens)))
+        if len(response)!=1:
+            raise RuntimeError("VL вернула не одну область")
+        page=_native_json(_as_plain_dict(response[0]))
+        guess=extract_text(page)
+        seconds=round(time.monotonic()-started,3)
+        record={"status":"ok" if guess else "unreadable", "ocr_id":identifier,
+                "text":guess,"seconds":seconds,
+                "page":page,"crop":[left,top,right,bottom]}
+        write_json(directory/f"hybrid-{identifier}.json",record)
+        emit("checkpoint",done=n+1,total=len(entries),seconds=seconds)
+    emit("complete",total=len(entries))
+
 def process(source_path, directory, device, settings, *,
-            pipeline_factory=None, detector_factory=None, benchmark=False):
+            pipeline_factory=None, detector_factory=None,
+            benchmark=False, hybrid=False):
     project = load_image(source_path)
     source = source_image(project)
     directory=Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    if settings.vl_strategy == "detect" or benchmark:
+    if hybrid:
+        process_hybrid(source, directory, device, settings,
+                       pipeline_factory=pipeline_factory)
+    elif settings.vl_strategy == "detect" or benchmark:
         process_detected(source, directory, device, settings, benchmark=benchmark,
                          detector_factory=detector_factory,
                          pipeline_factory=pipeline_factory)
@@ -198,9 +252,12 @@ def main():
         return 2
     image,folder,device,settings_file=sys.argv[1:5]
     benchmark = len(sys.argv) == 6 and sys.argv[5] == "benchmark"
+    hybrid = len(sys.argv) == 6 and sys.argv[5] == "hybrid"
+    if len(sys.argv) == 6 and not (benchmark or hybrid):
+        raise SystemExit("Неизвестный режим локального VL")
     try:
         settings=Settings.model_validate_json(Path(settings_file).read_text("utf-8"))
-        process(image,folder,device,settings,benchmark=benchmark)
+        process(image,folder,device,settings,benchmark=benchmark,hybrid=hybrid)
         return 0
     except BaseException as exc:
         traceback.print_exc(file=sys.stderr)
