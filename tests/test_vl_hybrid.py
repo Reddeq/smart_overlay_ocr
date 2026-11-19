@@ -147,7 +147,7 @@ def test_failed_vl_still_exports_original_ocr_pptx(monkeypatch,tmp_path):
         exported.append(project.model_copy(deep=True))
         Path(output).write_bytes(b"pptx fixture")
     monkeypatch.setattr("smart_overlay.one_click.export_pptx",export)
-    converted=convert_drawing(source,settings=Settings(ocr_engine="hybrid_local"),
+    converted=convert_drawing(source,settings=Settings(ocr_engine="hybrid_local", ensemble_enabled=False),
                               api_key="some_cloud_key",consent=True)
     assert converted.pptx.read_bytes()==b"pptx fixture"
     assert exported[0].objects[0].text=="MAlN"
