@@ -135,7 +135,7 @@ def _monitor_lines(pipe, output):
 
 def run_isolated(source_path, settings, device, diagnostics_dir, *,
                  progress, check, tile_timeout=180, startup_timeout=240,
-                 benchmark=False):
+                 benchmark=False, hybrid=False):
     """Interruptible, fully local process: bounded detection, model load, OCR.
 
     The supervisor kills the worker on timeout/cancel. Each recognized region
@@ -150,12 +150,14 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
            device, str(settings_path)]
     if benchmark:
         cmd.append("benchmark")
+    elif hybrid:
+        cmd.append("hybrid")
     stderr_path = diagnostics_dir / "paddle-vl-worker.log"
     state_file = diagnostics_dir / "paddle-vl-progress.json"
     events = Queue()
     active_tile = None
     completed_count = 0
-    strategy = "detect" if benchmark else settings.vl_strategy
+    strategy = "hybrid" if hybrid else ("detect" if benchmark else settings.vl_strategy)
     stage = "starting"
     def checkpoint_status(status, **details):
         payload = {"status": status, "strategy": strategy,
@@ -187,7 +189,7 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                 now = time.monotonic()
                 if now > deadline or (overall_deadline is not None and now > overall_deadline):
                     if active_tile is not None:
-                        where = f"{'строка' if strategy == 'detect' else 'участок'} {active_tile+1}"
+                        where = f"{'строка' if strategy in ("detect", "hybrid") else 'участок'} {active_tile+1}"
                     else:
                         where = stage
                     raise LocalVLError(
@@ -220,28 +222,28 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                     stage = "модель загружена"
                     overall_deadline = time.monotonic() + settings.vl_total_timeout_seconds
                     deadline = time.monotonic() + (settings.vl_region_timeout_seconds
-                              if strategy == "detect" else tile_timeout)
+                              if strategy in ("detect", "hybrid") else tile_timeout)
                     checkpoint_status("model_ready", total_regions=event["total"],
                                       model_load_seconds=event.get("model_load_seconds"))
                     progress(f"VL: модель загружена, ожидается {event['total']} распознаваний")
                 elif name in ("tile","region"):
                     active_tile = int(event["index"])
                     stage = "распознавание"
-                    if strategy == "detect":
+                    if strategy in ("detect", "hybrid"):
                         budget = (settings.vl_preflight_seconds if
                                   completed_count == 0 else settings.vl_region_timeout_seconds)
                         deadline = time.monotonic() + min(budget,settings.vl_region_timeout_seconds)
                     else:
                         deadline = time.monotonic() + tile_timeout
-                    checkpoint_status("running_region" if strategy=="detect" else "running_tile",
+                    checkpoint_status("running_region" if strategy in ("detect", "hybrid") else "running_tile",
                                       total_regions=event["total"])
-                    progress(f"VL: {'строка' if strategy=='detect' else 'участок'} "
+                    progress(f"VL: {'строка' if strategy in ("detect", "hybrid") else 'участок'} "
                              f"{active_tile+1}/{event['total']}…")
                 elif name == "checkpoint":
                     completed_count = int(event["done"])
                     active_tile = None
                     deadline = time.monotonic() + (settings.vl_region_timeout_seconds
-                              if strategy == "detect" else tile_timeout)
+                              if strategy in ("detect", "hybrid") else tile_timeout)
                     checkpoint_status("region_completed" if strategy=="detect" else "tile_completed",
                                       total_regions=event["total"],
                                       inference_seconds=event.get("seconds"))
@@ -277,6 +279,9 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
             raise LocalVLError("Бенчмарк завершился без отчёта: " + str(stderr_path))
         checkpoint_status("completed", benchmark=True)
         return json.loads(report_file.read_text("utf-8")), {"benchmark": True}
+    if hybrid:
+        checkpoint_status("completed", hybrid=True)
+        return {"hybrid": True}, {"hybrid": True}
     if strategy == "detect":
         from .vl_detect import detected_page
         manifest = diagnostics_dir / "paddle-vl-regions.json"
