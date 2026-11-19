@@ -180,7 +180,7 @@ def test_quick_ui_has_independent_local_vl_switch(gui_app, monkeypatch, tmp_path
     monkeypatch.setattr("smart_overlay.quick_app.load_settings", Settings)
     window = QuickWindow()
     try:
-        window.mode_combo.setCurrentIndex(1)
+        window.mode_combo.setCurrentIndex(window.mode_combo.findData("vl_local"))
         assert window.mode_combo.currentData() == "vl_local"
         assert window.settings.ocr_engine == "vl_local"
         assert not window.language_button.isEnabled()
