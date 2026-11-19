@@ -52,14 +52,16 @@ def process(source_path, directory, device, settings, *, pipeline_factory=defaul
         index = tile["index"]
         destination = directory / f"tile-{index:04d}.json"
         started = time.monotonic()
+        has_ink = tile_has_ink(source, tile)
+        if has_ink and pipeline is None:
+            # The worker is still INITIALIZING; only start per-tile timeout
+            # after model weights are loaded.
+            pipeline = pipeline_factory(device=device)
+            emit("started", total=len(tiles))
         emit("tile", index=index, total=len(tiles))
-        if not tile_has_ink(source, tile):
+        if not has_ink:
             write_json(destination, {"status": "skipped_blank", "tile": index})
         else:
-            if pipeline is None:
-                pipeline = pipeline_factory(device=device)
-                emit("started", total=len(tiles))
-                emit("tile", index=index, total=len(tiles))
             crop = source.crop((tile["x0"], tile["y0"], tile["x1"], tile["y1"]))
             image = cv2.cvtColor(np.asarray(crop), cv2.COLOR_RGB2BGR)
             pages = list(pipeline.predict(
