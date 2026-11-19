@@ -32,22 +32,28 @@ def tile_bounds(width: int, height: int, size=896, overlap=96, *, max_tiles=48):
             result.append(total-size)
         return result
     xs, ys = starts(width), starts(height)
-    tiles = [{"index": len(ys)*xi+yi, "x0": x, "y0": y,
-              "x1": min(width, x+size), "y1": min(height, y+size)}
-             for xi, x in enumerate(xs) for yi, y in enumerate(ys)]
-    # User should choose a larger tile, lower resolution, or fewer regions,
-    # rather than silently leaving unprocessed portions of a drawing.
-    if len(tiles) > max_tiles:
+    if len(xs)*len(ys) > max_tiles:
         raise LocalVLError(
-            f"Требуется {len(tiles)} участков (лимит {max_tiles}). "
+            f"Требуется {len(xs)*len(ys)} участков (лимит {max_tiles}). "
             "Увеличьте размер участка или разделите лист вручную.")
-    for i, tile in enumerate(tiles):
-        tile["index"] = i
-        tile["total"] = len(tiles)
-        tile["core_x0"] = tile["x0"] + (overlap/2 if tile["x0"] > 0 else 0)
-        tile["core_y0"] = tile["y0"] + (overlap/2 if tile["y0"] > 0 else 0)
-        tile["core_x1"] = tile["x1"] - (overlap/2 if tile["x1"] < width else 0)
-        tile["core_y1"] = tile["y1"] - (overlap/2 if tile["y1"] < height else 0)
+    # Partition overlapping stripes at the true midpoint between adjacent
+    # tile edges. The last tile can overlap more than the requested overlap.
+    xcores = [(0 if i == 0 else (xs[i-1]+size+xs[i])/2,
+               width if i == len(xs)-1 else (xs[i]+size+xs[i+1])/2)
+              for i in range(len(xs))]
+    ycores = [(0 if i == 0 else (ys[i-1]+size+ys[i])/2,
+               height if i == len(ys)-1 else (ys[i]+size+ys[i+1])/2)
+              for i in range(len(ys))]
+    tiles = []
+    for yi,y in enumerate(ys):
+        for xi,x in enumerate(xs):
+            tiles.append({
+                "index": len(tiles), "total": len(xs)*len(ys),
+                "x0": x, "y0": y, "x1": min(width,x+size),
+                "y1": min(height,y+size),
+                "core_x0": xcores[xi][0], "core_x1": xcores[xi][1],
+                "core_y0": ycores[yi][0], "core_y1": ycores[yi][1],
+            })
     return tiles
 
 
