@@ -212,15 +212,21 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         _cancelled(cancelled)
         if engine == "hybrid_local":
             from .vl_hybrid import selective_vl
+            from .ocr_ensemble import ensemble_hybrid
             folder = (Path(vl_diagnostics) if vl_diagnostics is not None else
                       data_dir() / "diagnostics" / "paddle-vl-hybrid" /
                       f"{source.stem}-{uuid4().hex[:8]}")
             # Fail open to the original OCR result, never leave the user
             # without a PPTX because a *secondary* neural checker stalled.
             try:
-                project, hybrid_warnings = selective_vl(
-                    project, source, settings, diagnostics_dir=folder,
-                    progress=progress, cancelled=cancelled)
+                if settings.ensemble_enabled:
+                    project, hybrid_warnings = ensemble_hybrid(
+                        project, source, settings, directory=folder,
+                        progress=progress, cancelled=cancelled)
+                else:
+                    project, hybrid_warnings = selective_vl(
+                        project, source, settings, diagnostics_dir=folder,
+                        progress=progress, cancelled=cancelled)
                 warnings.extend(hybrid_warnings)
             except ProcessingCancelled:
                 raise
