@@ -226,8 +226,10 @@ class QuickWindow(QMainWindow):
         mode_row.addWidget(QLabel("Способ распознавания:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Smart OCR · обычный", "smart")
-        self.mode_combo.addItem("PaddleOCR-VL 1.6 · локально (эксперимент)", "vl_local")
-        self.mode_combo.setCurrentIndex(0 if self.settings.ocr_engine == "smart" else 1)
+        self.mode_combo.addItem("Smart OCR + локальная VL-проверка", "hybrid_local")
+        self.mode_combo.addItem("PaddleOCR-VL 1.6 · целиком (эксперимент)", "vl_local")
+        engine_index = self.mode_combo.findData(self.settings.ocr_engine)
+        self.mode_combo.setCurrentIndex(max(0, engine_index))
         self.mode_combo.currentIndexChanged.connect(self.mode_changed)
         mode_row.addWidget(self.mode_combo)
         self.device_combo = QComboBox()
@@ -285,14 +287,17 @@ class QuickWindow(QMainWindow):
         self.statusBar().showMessage("Готово к работе")
 
     def mode_changed(self, *_):
-        local = self.mode_combo.currentData() == "vl_local"
-        self.settings.ocr_engine = "vl_local" if local else "smart"
-        self.language_button.setEnabled(not local and self.worker is None)
+        engine = self.mode_combo.currentData()
+        local = engine in ("vl_local", "hybrid_local")
+        self.settings.ocr_engine = engine
+        self.language_button.setEnabled(engine != "vl_local" and self.worker is None)
         self.device_combo.setEnabled(local and self.worker is None)
         self.device_combo.setVisible(local)
         self.statusBar().showMessage(
-            "VL полностью локальный: при первом запуске загрузятся веса; "
-            "результат требует проверки" if local else "Smart OCR готов")
+            "Гибрид: обычное OCR + до 3 локальных VL-проверок; никаких облачных запросов"
+            if engine == "hybrid_local" else
+            "VL полностью локальный: экспериментальный режим для небольших листов"
+            if engine == "vl_local" else "Smart OCR готов")
         self._save_mode()
 
     def device_changed(self, *_):
@@ -369,8 +374,9 @@ class QuickWindow(QMainWindow):
         if not self.path or self.worker:
             return
         consent = False
-        local_vl = self.mode_combo.currentData() == "vl_local"
-        if self.cloud_enabled and not local_vl:
+        engine = self.mode_combo.currentData()
+        local_vl = engine == "vl_local"
+        if self.cloud_enabled and engine == "smart":
             answer = QMessageBox.question(
                 self, "Облачное распознавание",
                 "Отправить части этого чертежа и распознанный текст в OpenRouter через настроенный VPN?\n"
@@ -383,11 +389,11 @@ class QuickWindow(QMainWindow):
             consent = answer == QMessageBox.StandardButton.Yes
 
         source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
-        engine = "vl_local" if local_vl else "smart"
         device = self.device_combo.currentData()
-        diagnostics = (data_dir() / "diagnostics" / "paddle-vl"
+        diagnostics = (data_dir() / "diagnostics" /
+                       ("paddle-vl-hybrid" if engine == "hybrid_local" else "paddle-vl")
                        / (self.path.stem + "-" + uuid4().hex[:8])
-                       if local_vl else None)
+                       if engine in ("vl_local", "hybrid_local") else None)
         self.set_busy(True)
         self.summary.setText("")
         self.status_text.setText("Начинаю распознавание…")
