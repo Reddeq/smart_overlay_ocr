@@ -7,6 +7,7 @@ one representative region only. The legacy tiled layout mode remains opt-in.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import sys
 import time
