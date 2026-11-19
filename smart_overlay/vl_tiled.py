@@ -7,7 +7,6 @@ The worker is a *local* Python child process; it never invokes a web API.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from queue import Empty, Queue
 import subprocess
@@ -15,7 +14,7 @@ import sys
 from threading import Thread
 import time
 
-from .vl_local import LocalVLError, NON_TEXT_LABELS
+from .vl_local import LocalVLError
 
 
 def tile_bounds(width: int, height: int, size=896, overlap=96, *, max_tiles=48):
@@ -71,7 +70,7 @@ def merge_tile_pages(tiles, checkpoint_dir, width, height):
     two presentations of the same label from becoming duplicate PPTX shapes.
     Geometry near seams remains a review concern, not an invented correction.
     """
-    results, skipped, errors, accepted = [], [], [], []
+    skipped, errors, accepted = [], [], []
     finished = 0
     for tile in tiles:
         filename = Path(checkpoint_dir) / f"tile-{tile['index']:04d}.json"
@@ -150,7 +149,17 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
            device, str(settings_path)]
     stderr_path = diagnostics_dir / "paddle-vl-worker.log"
     events = Queue()
+    state_file = diagnostics_dir / "paddle-vl-progress.json"
+    completed_count = 0
+    def checkpoint_status(status, **details):
+        payload = {"status": status, "completed_tiles": completed_count,
+                   "active_tile": active_tile, **details}
+        temp = state_file.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+        temp.replace(state_file)
     active_tile = None
+    checkpoint_status("initializing")
     started = time.monotonic()
     deadline = started + startup_timeout
     stopped = False
@@ -181,14 +190,19 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                 name = event.get("event")
                 if name == "started":
                     deadline = time.monotonic() + tile_timeout
+                    checkpoint_status("model_ready", total_tiles=event["total"])
                     progress(f"VL: модель загружена, запланировано участков: {event['total']}")
                 elif name == "tile":
                     active_tile = int(event["index"])
                     deadline = time.monotonic() + tile_timeout
+                    checkpoint_status("running_tile", total_tiles=event["total"])
                     progress(f"VL: участок {active_tile+1}/{event['total']}…")
                 elif name == "checkpoint":
+                    completed_count = int(event["done"])
                     active_tile = None
                     deadline = time.monotonic() + tile_timeout
+                    checkpoint_status("tile_completed", total_tiles=event["total"],
+                                      tile_seconds=event.get("seconds"))
                     progress(f"VL: сохранён участок {event['done']}/{event['total']} "
                              f"({event.get('seconds', 0):.1f} с)")
                 elif name == "error":
@@ -197,6 +211,7 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                         f"См. {stderr_path}")
                 elif name == "complete":
                     stopped = True
+                    checkpoint_status("worker_complete", total_tiles=event["total"])
                     break
                 elif name == "eof":
                     break
@@ -205,6 +220,11 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
                 raise LocalVLError(
                     f"Процесс PaddleOCR-VL завершился без полного результата "
                     f"(код {exit_code}). Журнал: {stderr_path}")
+    except BaseException as exc:
+        checkpoint_status("cancelled" if type(exc).__name__ == "ProcessingCancelled"
+                          else "failed", error_type=type(exc).__name__,
+                          message=str(exc)[:400])
+        raise
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()
@@ -216,6 +236,8 @@ def run_isolated(source_path, settings, device, diagnostics_dir, *,
     result, summary = merge_tile_pages(report["tiles"], diagnostics_dir,
                                        report["width"], report["height"])
     if summary["missing_or_failed"]:
+        checkpoint_status("failed", missing_or_failed=summary["missing_or_failed"])
         raise LocalVLError("Не все участки обработаны; PPTX не создаётся. "
                            f"Журнал: {stderr_path}")
+    checkpoint_status("completed", summary=summary)
     return result, summary
