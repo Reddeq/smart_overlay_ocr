@@ -358,7 +358,11 @@ def ensemble_hybrid(project, source_path, settings, *, directory,
         proposed=item["suggested"]
         # Independent model consensus + full-ID VL agreement can overrule
         # an overly confident old OCR, but only on low-risk non-code strings.
-        if proposed != record.get("consensus") or record.get("comparison")!="repeated_candidate_differs":
+        if (record.get("model") != V6_MODEL or
+                proposed != record.get("consensus") or
+                record.get("comparison") != "repeated_candidate_differs"):
+            # A repeated PP-OCRv5 reading of Cyrillic is NOT independent
+            # corroboration. Never auto-overwrite confident Russian labels.
             continue
         fragment=by_id[item["ocr_id"]]
         # hard floor for similarity; safe_change is reused with a capped
