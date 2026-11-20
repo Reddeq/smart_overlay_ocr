@@ -393,13 +393,27 @@ class QuickWindow(QMainWindow):
                     self, "Облачное OCR",
                     "Для полного облачного распознавания введите API-ключ в «Настройки».")
                 return
+            from .cloud_ocr import balanced_cloud_tiles, CloudOCRError
+            try:
+                source_info = load_image(self.path).source
+                plan = balanced_cloud_tiles(
+                    source_info.width, source_info.height,
+                    size=self.settings.cloud_ocr_tile_size,
+                    overlap=self.settings.cloud_ocr_overlap,
+                    max_tiles=self.settings.cloud_ocr_max_requests)
+            except (OSError, ValueError, CloudOCRError) as exc:
+                QMessageBox.warning(self, "План облачного OCR", str(exc))
+                return
             answer = QMessageBox.question(
                 self, "Подтверждение платного облачного OCR",
                 f"Отправить исходный чертёж в OpenRouter для полного распознавания?\n"
                 f"Модель: {self.settings.cloud_ocr_model}\n"
-                f"Не более {self.settings.cloud_ocr_max_requests} запросов через настроенный прокси.\n"
+                f"План: {len(plan)} запросов; области до "
+                f"{self.settings.cloud_ocr_tile_size} пикселей, "
+                f"перекрытие ~{self.settings.cloud_ocr_overlap} пикселей.\n"
+                f"Лимит ответа: {self.settings.cloud_ocr_max_tokens} токенов на запрос.\n"
                 "Запросы могут быть платными. После отправки оплата возможна даже при отмене.\n"
-                "Никакого предварительного локального OCR не будет.",
+                "Автоматических повторов нет; локальный OCR не используется.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
