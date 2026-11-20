@@ -177,7 +177,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
     settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
     engine = ocr_engine or settings.ocr_engine
-    if engine not in ("smart", "vl_local", "hybrid_local"):
+    if engine not in ("smart", "vl_local", "hybrid_local", "cloud_full"):
         raise ValueError("Неизвестный движок OCR")
     settings.ocr_engine = engine
     if vl_device is not None:
@@ -185,7 +185,28 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
             raise ValueError("PaddleOCR-VL: допустимы устройства cpu и gpu:0")
         settings.vl_device = vl_device
     grouping_requests = table_requests = 0
-    if engine == "vl_local":
+    if engine == "cloud_full":
+        from .cloud_ocr import recognize_cloud
+        if not consent:
+            raise ValueError("Требуется явное согласие на отправку всего чертежа в облако")
+        if not api_key:
+            raise ValueError("Укажите API-ключ OpenRouter для облачного OCR")
+        folder = (Path(vl_diagnostics) if vl_diagnostics is not None else
+                  data_dir() / "diagnostics" / "cloud-full" /
+                  f"{source.stem}-{uuid4().hex[:8]}")
+        progress("Облачное распознавание всего чертежа: без локального PaddleOCR")
+        project = recognize_cloud(
+            source_project, settings, api_key=api_key, consent=consent,
+            proxy=proxy or os.environ.get("SMART_OVERLAY_PROXY", ""),
+            diagnostics_dir=folder, progress=progress, cancelled=cancelled)
+        skipped_cloud = project.raw.get("cloud_ocr", {}).get("skipped", [])
+        if skipped_cloud:
+            warnings.append(
+                f"Облачный OCR: отклонено/дублировано областей: {len(skipped_cloud)}. "
+                f"Диагностика: {folder}")
+        warnings.append("Экспериментальное полное облачное распознавание: "
+                        "проверьте кириллицу, контакты и таблицы")
+    elif engine == "vl_local":
         from .vl_local import local_vl_ocr
         run_dir = (Path(vl_diagnostics) if vl_diagnostics is not None else
                    data_dir() / "diagnostics" / "paddle-vl" /
@@ -238,8 +259,8 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         raise ValueError("Неизвестный движок OCR")
     _cancelled(cancelled)
 
-    if engine in ("vl_local", "hybrid_local"):
-        pass  # No OpenRouter/network in local VL-only or local hybrid.
+    if engine in ("vl_local", "hybrid_local", "cloud_full"):
+        pass  # Cloud-only already ran; never invoke legacy grouping or local checks.
     elif consent and api_key:
         progress("Подготовка безопасной VL-группировки")
         try:
