@@ -268,6 +268,18 @@ def recognize_cloud(source:Project,settings:Settings,*,api_key:str,consent:bool,
         _write_json(folder,"cloud-ocr-error.json",{"kind":type(exc).__name__,
                    "message":str(exc)[:500],"stage":"conversion"})
         raise CloudOCRError(f"Облачный ответ не удалось преобразовать в PPTX: {exc}") from exc
+    # The converter is shared with local VL to avoid duplicating geometry
+    # and table logic. Its original source labels must NOT misrepresent this
+    # completely cloud-only run as on-device PaddleOCR-VL.
+    project.raw.pop("local_vl", None)
+    project.messages = [
+        message for message in project.messages
+        if not message.startswith(("PaddleOCR-VL-1.6:", "VL:"))]
+    for obj in project.objects:
+        obj.review_notes = [
+            note.replace("PaddleOCR-VL:", "Облачное OCR:")
+                .replace("VL определила", "Облачная модель определила")
+            for note in obj.review_notes]
     project.raw["cloud_ocr"]={
         "provider":"OpenRouter","model":settings.cloud_ocr_model,
         "requests":len(tiles),"usage":observations,"skipped":skipped,
