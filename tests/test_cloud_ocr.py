@@ -7,7 +7,7 @@ import pytest
 
 from smart_overlay.cloud_ocr import (
     CloudBlock, CloudReply, CloudOCRError, merge_blocks,
-    prompt, recognize_cloud, payload,
+    prompt, recognize_cloud, payload, balanced_cloud_tiles, decode_reply,
 )
 from smart_overlay.input import load_image
 from smart_overlay.one_click import convert_drawing
@@ -38,7 +38,8 @@ def test_cloud_payload_uses_raw_image_not_ocr_transcript(image_path):
     parts=p["messages"][1]["content"]
     assert parts[1]["type"]=="image_url"
     assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert "PRIMARY recognition directly from the IMAGE" in parts[0]["text"]
+    assert "Transcribe ALL visible" in parts[0]["text"]
+    assert p["reasoning"] == {"max_tokens": 1024}
 
 
 def test_single_cloud_request_produces_editable_text_and_merged_native_table(image_path,tmp_path):
@@ -167,3 +168,96 @@ def test_unknown_or_out_of_bounds_blocks_get_rejected():
     page,skipped=merge_blocks(tiles,[reply],640,480)
     assert [p["block_content"] for p in page["parsing_res_list"]]==["OK"]
     assert len(skipped)==2
+
+
+def test_regression_1408x1024_cloud_no_640px_duplicate_overlap():
+    """The exact failed user's drawing formerly produced 2 giant 1024px tiles."""
+    tiles=balanced_cloud_tiles(1408,1024,size=768,overlap=64,max_tiles=8)
+    assert len(tiles)==4
+    assert {(t["x1"]-t["x0"],t["y1"]-t["y0"]) for t in tiles}=={(736,544)}
+    row=sorted((t for t in tiles if t["y0"]==0),key=lambda t:t["x0"])
+    col=sorted((t for t in tiles if t["x0"]==0),key=lambda t:t["y0"])
+    assert row[0]["x1"]-row[1]["x0"]==64
+    assert col[0]["y1"]-col[1]["y0"]==64
+    assert row[0]["core_x1"]==row[1]["core_x0"]==704
+    assert col[0]["core_y1"]==col[1]["core_y0"]==512
+    assert all(max(t["x1"]-t["x0"],t["y1"]-t["y0"])<=768 for t in tiles)
+    with pytest.raises(CloudOCRError,match="4 облачных"):
+        balanced_cloud_tiles(1408,1024,size=768,overlap=64,max_tiles=2)
+
+
+def test_balanced_tiling_covers_all_pixels_with_small_overlap():
+    for width,height in [(600,400),(1408,1024),(2048,2048),(2476,1100),(1920,1080)]:
+        tiles=balanced_cloud_tiles(width,height,size=768,overlap=64,max_tiles=32)
+        assert all((t["x1"]-t["x0"]<=768 and t["y1"]-t["y0"]<=768) for t in tiles)
+        assert max(t["x1"] for t in tiles)==width
+        assert max(t["y1"] for t in tiles)==height
+        for x,y in [(0,0),(width-1,height-1),(width//3,height//2)]:
+            owners=[t for t in tiles if
+                    t["core_x0"]<=x<t["core_x1"] and
+                    t["core_y0"]<=y<t["core_y1"]]
+            assert len(owners)==1
+
+
+def test_accept_compact_six_element_cloud_ocr_json():
+    body=json.dumps({"blocks":[
+        ["t",20,30,130,55,"Кассета 2"],
+        ["h",200,110,420,300,"<table><tr><td>Конт.</td></tr></table>"]
+    ]},ensure_ascii=False)
+    parsed=decode_reply(body)
+    assert parsed.blocks[0].kind=="text"
+    assert parsed.blocks[0].text=="Кассета 2"
+    assert parsed.blocks[1].kind=="table"
+    assert parsed.blocks[1].html.startswith("<table>")
+    with pytest.raises(ValueError,match="неверный компактный блок"):
+        decode_reply('{"blocks":[["t",12,24]]}')
+
+
+def test_reasoning_budget_only_for_supported_gemini_25(image_path):
+    img=Image.open(image_path)
+    tile={"x0":0,"y0":0,"x1":640,"y1":480}
+    settings=Settings(cloud_ocr_model="anthropic/claude-sonnet-4")
+    result=payload(settings,{"image":img,"tile":tile})
+    assert "reasoning" not in result
+    with pytest.raises(ValueError,match="Бюджет рассуждений"):
+        Settings(cloud_ocr_max_tokens=1024,cloud_ocr_reasoning_tokens=1024)
+
+
+def test_truncated_cloud_json_does_not_retry_and_records_usage(image_path,tmp_path):
+    called=[]
+    def truncated(*args):
+        called.append(True)
+        return {"choices":[{"finish_reason":"length",
+                            "message":{"content":""}}],
+                "usage":{"prompt_tokens":1020,"completion_tokens":8192,
+                         "total_tokens":9212,
+                         "completion_tokens_details":{"reasoning_tokens":7000},
+                         "cost":0.05}}
+    folder=tmp_path/"failed"
+    with pytest.raises(CloudOCRError,match="finish_reason=length"):
+        recognize_cloud(load_image(image_path),Settings(),
+                        api_key="test-key",consent=True,proxy=None,
+                        diagnostics_dir=folder,requester=truncated)
+    assert len(called)==1
+    report=json.loads((folder/"cloud-ocr-error.json").read_text("utf-8"))
+    assert report["kind"]=="TruncatedResponse"
+    assert report["finish_reason"]=="length"
+    assert report["usage"]["completion_tokens_details"]["reasoning_tokens"]==7000
+    assert report["automatic_retry"] is False
+    assert not (folder/"cloud-ocr-merged.json").exists()
+
+
+def test_upgrade_previous_saved_cloud_crop_defaults(tmp_path,monkeypatch):
+    from smart_overlay.settings import load_settings
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+    base=Settings().model_dump()
+    base.pop("cloud_ocr_profile_version")
+    base["cloud_ocr_tile_size"]=1024
+    base["cloud_ocr_overlap"]=96
+    folder=tmp_path/"SmartOverlayOCR"
+    folder.mkdir()
+    (folder/"settings.json").write_text(json.dumps(base),encoding="utf-8")
+    actual=load_settings()
+    assert actual.cloud_ocr_tile_size==768
+    assert actual.cloud_ocr_overlap==64
+    assert actual.cloud_ocr_profile_version==2
