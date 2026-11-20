@@ -288,6 +288,33 @@ def recognize_cloud(source:Project,settings:Settings,*,api_key:str,consent:bool,
                                  "usage":numbers})
             replies.append(reply)
             progress(f"Облако: обработано {i+1}/{len(tiles)}, блоков {len(reply.blocks)}")
+        except TruncatedResponse as exc:
+            # A request can be billed even though its visible JSON is missing
+            # or incomplete; persist safe usage metadata, never auto-retry.
+            usage=result.get("usage",{}) if isinstance(result,dict) else {}
+            usage_meta={}
+            if isinstance(usage,dict):
+                for key in ("prompt_tokens","completion_tokens","total_tokens",
+                            "cost","completion_tokens_details"):
+                    if isinstance(usage.get(key),(int,float,dict)):
+                        usage_meta[key]=usage[key]
+            _write_json(folder,"cloud-ocr-error.json",{
+                "tile":i,"kind":"TruncatedResponse","finish_reason":"length",
+                "completed":len(replies),"usage":usage_meta,
+                "model":settings.cloud_ocr_model,
+                "max_output_tokens":settings.cloud_ocr_max_tokens,
+                "reasoning_max_tokens": (
+                    settings.cloud_ocr_reasoning_tokens
+                    if settings.cloud_ocr_model.startswith("google/gemini-2.5-")
+                    else None),
+                "message":str(exc)[:450],
+                "recommended_action":"Use balanced smaller crops or explicitly "
+                                     "increase token budget after reviewing costs.",
+                "automatic_retry":False})
+            raise CloudOCRError(
+                f"Облачная модель обрезала JSON на области {i+1}/{len(tiles)} "
+                "(finish_reason=length). Запрос мог тарифицироваться; "
+                f"автоматического повтора не будет. Диагностика: {folder}") from exc
         except RequestCancelled as exc:
             _write_json(folder,"cloud-ocr-error.json",{
                 "tile":i,"kind":"cancelled","completed":len(replies),
