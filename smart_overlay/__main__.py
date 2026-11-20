@@ -32,6 +32,8 @@ def main():
     one.add_argument("--cloud-max-requests", type=int, help="Maximum paid image requests")
     one.add_argument("--cloud-tile-size", type=int, help="Pixel size of cloud OCR crop (512–2048)")
     one.add_argument("--cloud-max-tokens", type=int, help="Max output tokens per paid image request")
+    one.add_argument("--cloud-reasoning-tokens", type=int,
+                     help="Gemini 2.5 thinking budget included inside max output tokens")
     one.add_argument("--cloud-timeout", type=int, help="Seconds per cloud OCR image request")
     one.add_argument("--vl-device", choices=["cpu", "gpu:0"], default=None,
                      help="PaddleOCR-VL runtime device; CPU is the safe default")
@@ -153,6 +155,7 @@ def main():
                      "cloud_ocr_max_requests": args.cloud_max_requests,
                      "cloud_ocr_tile_size": args.cloud_tile_size,
                      "cloud_ocr_max_tokens": args.cloud_max_tokens,
+                     "cloud_ocr_reasoning_tokens": args.cloud_reasoning_tokens,
                      "cloud_ocr_timeout": args.cloud_timeout}
         if any(v is not None for v in overrides.values()):
             settings = Settings.model_validate({
