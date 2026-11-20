@@ -26,8 +26,13 @@ def main():
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
     one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
     one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
-    one.add_argument("--ocr-engine", choices=["smart", "vl_local", "hybrid_local"], default=None,
+    one.add_argument("--ocr-engine", choices=["smart", "vl_local", "hybrid_local", "cloud_full"], default=None,
                      help="Use classic Smart OCR or independent, fully local PaddleOCR-VL 1.6")
+    one.add_argument("--cloud-model", help="OpenRouter image-capable model, e.g. google/gemini-2.5-pro")
+    one.add_argument("--cloud-max-requests", type=int, help="Maximum paid image requests")
+    one.add_argument("--cloud-tile-size", type=int, help="Pixel size of cloud OCR crop (512–2048)")
+    one.add_argument("--cloud-max-tokens", type=int, help="Max output tokens per paid image request")
+    one.add_argument("--cloud-timeout", type=int, help="Seconds per cloud OCR image request")
     one.add_argument("--vl-device", choices=["cpu", "gpu:0"], default=None,
                      help="PaddleOCR-VL runtime device; CPU is the safe default")
     one.add_argument("--vl-diagnostics", type=Path,
@@ -118,10 +123,16 @@ def main():
             parser.error("Local VL/hybrid and --smart (cloud) are mutually exclusive")
         if args.smart and not args.consent_api:
             parser.error("Cloud processing requires --consent-api for this drawing")
+        if args.ocr_engine == "cloud_full" and not args.consent_api:
+            parser.error("Full cloud OCR requires --consent-api for this drawing")
         settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
                     if args.settings else Settings(ocr_language_mode="auto"))
         if args.smart and (args.ocr_engine or settings.ocr_engine) in ("vl_local", "hybrid_local"):
             parser.error("Local PaddleOCR-VL/hybrid cannot be combined with cloud --smart")
+        if (args.ocr_engine or settings.ocr_engine) == "cloud_full" and not args.consent_api:
+            parser.error("Full cloud OCR requires --consent-api for this drawing")
+        if (args.ocr_engine or settings.ocr_engine) == "cloud_full" and args.smart:
+            parser.error("--smart and full cloud OCR are mutually exclusive")
         if args.languages is not None:
             codes = [c.strip() for c in args.languages.split(",")]
             settings = Settings.model_validate({**settings.model_dump(),
@@ -137,7 +148,12 @@ def main():
                      "vl_total_timeout_seconds": args.vl_total_timeout,
                      "hybrid_max_checks": args.hybrid_max_checks,
                      "ensemble_batch_size": args.ensemble_batch_size,
-                     "ensemble_max_batches": args.ensemble_max_batches}
+                     "ensemble_max_batches": args.ensemble_max_batches,
+                     "cloud_ocr_model": args.cloud_model,
+                     "cloud_ocr_max_requests": args.cloud_max_requests,
+                     "cloud_ocr_tile_size": args.cloud_tile_size,
+                     "cloud_ocr_max_tokens": args.cloud_max_tokens,
+                     "cloud_ocr_timeout": args.cloud_timeout}
         if any(v is not None for v in overrides.values()):
             settings = Settings.model_validate({
                 **settings.model_dump(),
@@ -149,7 +165,9 @@ def main():
                 "ensemble_apply_consensus": args.ensemble_apply_consensus})
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-                                 consent=args.smart and args.consent_api, proxy=args.proxy,
+                                 consent=args.consent_api and
+                                         (args.smart or (args.ocr_engine or settings.ocr_engine)=="cloud_full"),
+                                 proxy=args.proxy,
                                  ocr_engine=args.ocr_engine, vl_device=args.vl_device,
                                  vl_diagnostics=args.vl_diagnostics, progress=print)
         print(result.pptx)
