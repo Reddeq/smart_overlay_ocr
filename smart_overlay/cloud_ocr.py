@@ -7,13 +7,11 @@ reviewable. A failed request may have been billed; NEVER retry automatically.
 """
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 import json
 import math
-import time
 
-from PIL import Image
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .input import source_image
@@ -23,7 +21,6 @@ from .vision import image_part, response_content, response_json
 from .vision_transport import post_json, RequestCancelled, RequestTimedOut
 from .vl_local import LocalVLError, parse_page
 from .vl_tiled import tile_bounds
-from .geometry import intersection
 from .structure import validate_project
 
 
@@ -130,6 +127,8 @@ def merge_blocks(tiles, replies, width, height):
     Overlap ownership is determined by bbox centre in tile's disjoint core.
     No duplicate text is created for two copies of an overlapping label.
     """
+    if len(tiles) != len(replies):
+        raise CloudOCRError("Облачный OCR: обработаны не все участки чертежа")
     merged, skipped = [], []
     for tile, reply in zip(tiles,replies):
         for index,block in enumerate(reply.blocks):
@@ -155,6 +154,9 @@ def merge_blocks(tiles, replies, width, height):
                 continue
             if block.kind=="table" and "<table" not in content.lower():
                 skipped.append({"tile":tile["index"],"index":index,"reason":"not_html_table"})
+                continue
+            if not math.isfinite(block.rotation) or abs(block.rotation)>360:
+                skipped.append({"tile":tile["index"],"index":index,"reason":"invalid_rotation"})
                 continue
             # Prevent a hallucinated page-size text box from masking the diagram.
             if block.kind=="text" and ((x1-x0)*(y1-y0)>width*height*.20):
@@ -204,11 +206,12 @@ def recognize_cloud(source:Project,settings:Settings,*,api_key:str,consent:bool,
         "note":"Sent full image crops to selected external provider after consent."
     })
     call=requester or _request
+    from .one_click import ProcessingCancelled
     replies=[]
     observations=[]
     for i,tile in enumerate(tiles):
         if cancelled():
-            raise CloudOCRError("Обработка отменена до завершения; PPTX не создаётся")
+            raise ProcessingCancelled("Облачное распознавание отменено; PPTX не создаётся")
         crop=image.crop((tile["x0"],tile["y0"],tile["x1"],tile["y1"]))
         try:
             result=call(settings,api_key,proxy,payload(settings,{"image":crop,"tile":tile}),
@@ -225,21 +228,37 @@ def recognize_cloud(source:Project,settings:Settings,*,api_key:str,consent:bool,
                                  "usage":numbers})
             replies.append(reply)
             progress(f"Облако: обработано {i+1}/{len(tiles)}, блоков {len(reply.blocks)}")
-        except (RequestCancelled, RequestTimedOut) as exc:
+        except RequestCancelled as exc:
             _write_json(folder,"cloud-ocr-error.json",{
-                "tile":i,"kind":type(exc).__name__,
-                "message":str(exc)[:500],"completed":len(replies),
-                "note":"No automatic retry: a timed-out request may already be billed."})
+                "tile":i,"kind":"cancelled","completed":len(replies),
+                "note":"The last request may already have been billed."})
+            raise ProcessingCancelled("Облачный OCR отменён; завершённые участки сохранены") from exc
+        except RequestTimedOut as exc:
+            _write_json(folder,"cloud-ocr-error.json",{
+                "tile":i,"kind":"timeout","completed":len(replies),
+                "message":str(exc)[:500],
+                "note":"No automatic retry: the request may already be billed."})
             raise CloudOCRError(
-                f"Облачный OCR: {type(exc).__name__}; уже принятый запрос "
-                f"мог тарифицироваться. Диагностика: {folder}") from exc
-        except (ValueError, ValidationError, RuntimeError, OSError) as exc:
+                f"Тайм-аут облачного OCR: запрос мог тарифицироваться. "
+                f"Диагностика: {folder}") from exc
+        except ProcessingCancelled:
+            raise
+        except (ValueError, RuntimeError, OSError, httpx.HTTPError) as exc:
             _write_json(folder,"cloud-ocr-error.json",{
                 "tile":i,"kind":type(exc).__name__,
                 "message":str(exc)[:500],"completed":len(replies)})
             raise CloudOCRError(f"Не удалось разобрать ответ облака, блок {i+1}/{len(tiles)}. "
                                 f"См. {folder}") from exc
     page,skipped=merge_blocks(tiles,replies,image.width,image.height)
+    rejected=[item for item in skipped if item["reason"] != "duplicate_overlap"]
+    total_blocks=sum(len(reply.blocks) for reply in replies)
+    if total_blocks >= 10 and len(rejected)/total_blocks > .25:
+        _write_json(folder,"cloud-ocr-error.json",{
+            "stage":"geometry","returned":total_blocks,
+            "rejected":len(rejected),"reasons":rejected[:80]})
+        raise CloudOCRError(
+            "Облако вернуло слишком много областей с неверной геометрией; "
+            "PPTX не создаётся, чтобы не скрыть ошибки. См. "+str(folder))
     if not page["parsing_res_list"]:
         raise CloudOCRError("Облако не вернуло пригодных текстовых блоков; PPTX не создаётся")
     _write_json(folder,"cloud-ocr-merged.json",page)
