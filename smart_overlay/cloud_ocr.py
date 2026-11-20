@@ -32,7 +32,7 @@ class CloudOCRError(RuntimeError):
     pass
 
 
-def balanced_cloud_tiles(width, height, *, size=576, overlap=48, max_tiles=8):
+def balanced_cloud_tiles(width, height, *, size=640, overlap=48, max_tiles=8):
     """Evenly divide the source, with approximately the requested overlap.
 
     Do not shift a full-size final tile backwards to the image edge: doing so
@@ -320,12 +320,12 @@ def recognize_cloud(source:Project,settings:Settings,*,api_key:str,consent:bool,
             raw=response_content(result)
             reply=decode_reply(raw)
             # Zero blocks is allowed for genuinely blank, diagram-only areas.
-            _write_json(folder,f"cloud-ocr-{i:02d}.json",reply.model_dump())
-            # Persist resolved coordinate interpretation next to the answer.
+            # Resolve the answer's coordinate system before checkpointing.
             reply.coordinate_system=_reply_coordinates(
                 reply,tile,"normalized_1000_xyxy" if
                 settings.cloud_ocr_model.startswith("google/gemini-") else
                 "pixel_xyxy")
+            _write_json(folder,f"cloud-ocr-{i:02d}.json",reply.model_dump())
             usage=result.get("usage",{}) if isinstance(result,dict) else {}
             numbers={key:usage[key] for key in ("prompt_tokens","completion_tokens",
                      "total_tokens","cost") if isinstance(usage,dict)
