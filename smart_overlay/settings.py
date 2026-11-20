@@ -37,10 +37,11 @@ class Settings(Model):
     ocr_version: Literal["PP-OCRv5", "PP-OCRv4", "PP-OCRv3"] = "PP-OCRv5"
     endpoint: str = "https://openrouter.ai/api/v1"
     cloud_ocr_model: str = "google/gemini-2.5-pro"
-    cloud_ocr_tile_size: int = Field(default=1024, ge=512, le=2048)
-    cloud_ocr_overlap: int = Field(default=96, ge=0, le=256)
+    cloud_ocr_tile_size: int = Field(default=768, ge=512, le=2048)
+    cloud_ocr_overlap: int = Field(default=64, ge=0, le=256)
     cloud_ocr_max_requests: int = Field(default=8, ge=1, le=32)
     cloud_ocr_max_tokens: int = Field(default=8192, ge=1024, le=32768)
+    cloud_ocr_reasoning_tokens: int = Field(default=1024, ge=0, le=8192)
     cloud_ocr_timeout: int = Field(default=240, ge=30, le=900)
     model: str = ""
     retries: int = Field(default=2, ge=0, le=5)
@@ -62,6 +63,9 @@ class Settings(Model):
     def valid(self):
         if self.cloud_ocr_overlap * 2 >= self.cloud_ocr_tile_size:
             raise ValueError("Перекрытие облачных фрагментов слишком велико")
+        if (self.cloud_ocr_reasoning_tokens and
+                self.cloud_ocr_reasoning_tokens >= self.cloud_ocr_max_tokens):
+            raise ValueError("Бюджет рассуждений должен быть меньше общего лимита ответа")
         if not self.cloud_ocr_model.strip() or len(self.cloud_ocr_model)>160:
             raise ValueError("Не указана допустимая модель облачного OCR")
         if self.vl_tile_overlap * 2 >= self.vl_tile_size:
