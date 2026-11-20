@@ -37,6 +37,7 @@ class Settings(Model):
     ocr_version: Literal["PP-OCRv5", "PP-OCRv4", "PP-OCRv3"] = "PP-OCRv5"
     endpoint: str = "https://openrouter.ai/api/v1"
     cloud_ocr_model: str = "google/gemini-2.5-pro"
+    cloud_ocr_profile_version: int = 2
     cloud_ocr_tile_size: int = Field(default=768, ge=512, le=2048)
     cloud_ocr_overlap: int = Field(default=64, ge=0, le=256)
     cloud_ocr_max_requests: int = Field(default=8, ge=1, le=32)
@@ -93,7 +94,19 @@ def data_dir() -> Path:
 
 def load_settings() -> Settings:
     path = data_dir() / "settings.json"
-    return Settings.model_validate_json(path.read_text("utf-8")) if path.exists() else Settings()
+    if not path.exists():
+        return Settings()
+    raw = json.loads(path.read_text("utf-8"))
+    # The first cloud-only release saved default 1024/96 crops explicitly.
+    # Move that untouched default to the bounded profile instead of silently
+    # keeping the old 640px overlap on the next GUI launch.
+    if "cloud_ocr_profile_version" not in raw:
+        if (raw.get("cloud_ocr_tile_size") == 1024 and
+                raw.get("cloud_ocr_overlap") == 96):
+            raw["cloud_ocr_tile_size"] = 768
+            raw["cloud_ocr_overlap"] = 64
+        raw["cloud_ocr_profile_version"] = 2
+    return Settings.model_validate(raw)
 
 
 def save_settings(settings: Settings):
