@@ -10,7 +10,7 @@ from .models import Model
 
 
 class Settings(Model):
-    ocr_engine: Literal["smart", "vl_local", "hybrid_local"] = "smart"
+    ocr_engine: Literal["smart", "vl_local", "hybrid_local", "cloud_full"] = "smart"
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
     hybrid_max_checks: int = Field(default=3, ge=0, le=30)
     hybrid_confidence: float = Field(default=0.74, ge=0, le=1)
@@ -36,6 +36,12 @@ class Settings(Model):
     ocr_languages: list[str] = Field(default_factory=list)
     ocr_version: Literal["PP-OCRv5", "PP-OCRv4", "PP-OCRv3"] = "PP-OCRv5"
     endpoint: str = "https://openrouter.ai/api/v1"
+    cloud_ocr_model: str = "google/gemini-2.5-pro"
+    cloud_ocr_tile_size: int = Field(default=1024, ge=512, le=2048)
+    cloud_ocr_overlap: int = Field(default=96, ge=0, le=256)
+    cloud_ocr_max_requests: int = Field(default=8, ge=1, le=32)
+    cloud_ocr_max_tokens: int = Field(default=8192, ge=1024, le=32768)
+    cloud_ocr_timeout: int = Field(default=240, ge=30, le=900)
     model: str = ""
     retries: int = Field(default=2, ge=0, le=5)
     connect_timeout: float = Field(default=10, ge=1, le=120)
@@ -54,6 +60,10 @@ class Settings(Model):
 
     @model_validator(mode="after")
     def valid(self):
+        if self.cloud_ocr_overlap * 2 >= self.cloud_ocr_tile_size:
+            raise ValueError("Перекрытие облачных фрагментов слишком велико")
+        if not self.cloud_ocr_model.strip() or len(self.cloud_ocr_model)>160:
+            raise ValueError("Не указана допустимая модель облачного OCR")
         if self.vl_tile_overlap * 2 >= self.vl_tile_size:
             raise ValueError("Перекрытие VL должно быть меньше половины размера участка")
         if self.ocr_language_mode != "single":
