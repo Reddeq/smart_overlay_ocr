@@ -50,18 +50,22 @@ class ConnectionDialog(QDialog):
         self.resize(520, 200)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.cloud = QCheckBox("Улучшать группировку и таблицы через OpenRouter")
+        self.cloud = QCheckBox("Для обычного Smart OCR разрешить облачную группировку")
         self.cloud.setChecked(enabled)
         form.addRow("", self.cloud)
         self.key = QLineEdit(key)
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         self.key.setPlaceholderText("sk-or-… (не сохраняется на диск)")
-        form.addRow("API-ключ", self.key)
+        form.addRow("API-ключ OpenRouter", self.key)
+        self.cloud_model = QLineEdit(settings.cloud_ocr_model)
+        self.cloud_model.setPlaceholderText("google/gemini-2.5-pro")
+        self.cloud_model.setToolTip("Модель, которой будет отправлен весь чертёж в режиме облачного OCR")
+        form.addRow("Модель полного облачного OCR", self.cloud_model)
         self.proxy = QLineEdit(proxy)
         self.proxy.setPlaceholderText("http://127.0.0.1:10809")
         form.addRow("Прокси Xray", self.proxy)
         layout.addLayout(form)
-        notice = QLabel("Локальный OCR работает без ключа и сети. При облачном анализе части чертежа передаются провайдеру и могут тарифицироваться. Перед отправкой каждого файла будет запрос согласия.")
+        notice = QLabel("Режим «Облако · весь чертёж» отправляет исходные изображения в OpenRouter и может тарифицироваться. Для него потребуется подтверждение каждого запуска. Локальные режимы не передают изображение без отдельного согласия.")
         notice.setWordWrap(True)
         layout.addWidget(notice)
         controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -70,7 +74,9 @@ class ConnectionDialog(QDialog):
         layout.addWidget(controls)
 
     def accept(self):
-        if self.cloud.isChecked() and not self.key.text().strip():
+        if (self.cloud.isChecked() or self.parent() and
+                getattr(self.parent(), "mode_combo", None) and
+                self.parent().mode_combo.currentData() == "cloud_full") and not self.key.text().strip():
             QMessageBox.warning(self, "OpenRouter", "Для облачного распознавания укажите API-ключ или отключите облачный режим.")
             return
         super().accept()
@@ -227,6 +233,7 @@ class QuickWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("Smart OCR · обычный", "smart")
         self.mode_combo.addItem("Smart OCR · два распознавателя + VL", "hybrid_local")
+        self.mode_combo.addItem("Облако · весь чертёж (эксперимент)", "cloud_full")
         self.mode_combo.addItem("PaddleOCR-VL 1.6 · целиком (эксперимент)", "vl_local")
         engine_index = self.mode_combo.findData(self.settings.ocr_engine)
         self.mode_combo.setCurrentIndex(max(0, engine_index))
@@ -290,10 +297,12 @@ class QuickWindow(QMainWindow):
         engine = self.mode_combo.currentData()
         local = engine in ("vl_local", "hybrid_local")
         self.settings.ocr_engine = engine
-        self.language_button.setEnabled(engine != "vl_local" and self.worker is None)
+        self.language_button.setEnabled(engine not in ("vl_local", "cloud_full") and self.worker is None)
         self.device_combo.setEnabled(local and self.worker is None)
         self.device_combo.setVisible(local)
         self.statusBar().showMessage(
+            "Полностью облачное OCR: модель читает изображение напрямую, запросы платные"
+            if engine == "cloud_full" else
             "Гибрид: PP-OCRv5 + совместимые модели PP-OCRv6, затем пакетная VL-проверка; без облака"
             if engine == "hybrid_local" else
             "VL полностью локальный: экспериментальный режим для небольших листов"
@@ -364,7 +373,9 @@ class QuickWindow(QMainWindow):
         self.api_key = dialog.key.text().strip()
         self.proxy = dialog.proxy.text().strip()
         self.cloud_enabled = dialog.cloud.isChecked()
+        self.settings.cloud_ocr_model = dialog.cloud_model.text().strip()
         try:
+            self.settings = type(self.settings).model_validate(self.settings.model_dump())
             save_settings(self.settings)
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "Настройки", str(exc))
@@ -376,7 +387,25 @@ class QuickWindow(QMainWindow):
         consent = False
         engine = self.mode_combo.currentData()
         local_vl = engine == "vl_local"
-        if self.cloud_enabled and engine == "smart":
+        if engine == "cloud_full":
+            if not self.api_key:
+                QMessageBox.warning(
+                    self, "Облачное OCR",
+                    "Для полного облачного распознавания введите API-ключ в «Настройки».")
+                return
+            answer = QMessageBox.question(
+                self, "Подтверждение платного облачного OCR",
+                f"Отправить исходный чертёж в OpenRouter для полного распознавания?\n"
+                f"Модель: {self.settings.cloud_ocr_model}\n"
+                f"Не более {self.settings.cloud_ocr_max_requests} запросов через настроенный прокси.\n"
+                "Запросы могут быть платными. После отправки оплата возможна даже при отмене.\n"
+                "Никакого предварительного локального OCR не будет.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            consent = True
+        elif self.cloud_enabled and engine == "smart":
             answer = QMessageBox.question(
                 self, "Облачное распознавание",
                 "Отправить части этого чертежа и распознанный текст в OpenRouter через настроенный VPN?\n"
@@ -391,9 +420,10 @@ class QuickWindow(QMainWindow):
         source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
         device = self.device_combo.currentData()
         diagnostics = (data_dir() / "diagnostics" /
-                       ("paddle-vl-hybrid" if engine == "hybrid_local" else "paddle-vl")
+                       ("cloud-full" if engine == "cloud_full" else
+                        "paddle-vl-hybrid" if engine == "hybrid_local" else "paddle-vl")
                        / (self.path.stem + "-" + uuid4().hex[:8])
-                       if engine in ("vl_local", "hybrid_local") else None)
+                       if engine in ("vl_local", "hybrid_local", "cloud_full") else None)
         self.set_busy(True)
         self.summary.setText("")
         self.status_text.setText("Начинаю распознавание…")
