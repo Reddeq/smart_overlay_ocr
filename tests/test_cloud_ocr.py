@@ -25,7 +25,7 @@ def image_path(tmp_path):
 
 def answer(blocks):
     return {"choices":[{"finish_reason":"stop","message":{
-        "content":json.dumps({"blocks":blocks},ensure_ascii=False)}}],
+        "content":json.dumps({"coordinate_system":"pixel_xyxy","blocks":blocks},ensure_ascii=False)}}],
         "usage":{"prompt_tokens":150,"completion_tokens":250,"total_tokens":400}}
 
 
@@ -38,7 +38,7 @@ def test_cloud_payload_uses_raw_image_not_ocr_transcript(image_path):
     parts=p["messages"][1]["content"]
     assert parts[1]["type"]=="image_url"
     assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert "Transcribe ALL visible" in parts[0]["text"]
+    assert "NORMALIZED 0-1000 XYXY" in parts[0]["text"]
     assert p["reasoning"] == {"max_tokens": 1024}
 
 
@@ -172,18 +172,18 @@ def test_unknown_or_out_of_bounds_blocks_get_rejected():
 
 def test_regression_1408x1024_cloud_no_640px_duplicate_overlap():
     """The exact failed user's drawing formerly produced 2 giant 1024px tiles."""
-    tiles=balanced_cloud_tiles(1408,1024,size=768,overlap=64,max_tiles=8)
-    assert len(tiles)==4
-    assert {(t["x1"]-t["x0"],t["y1"]-t["y0"]) for t in tiles}=={(736,544)}
+    tiles=balanced_cloud_tiles(1408,1024,size=640,overlap=48,max_tiles=8)
+    assert len(tiles)==6
+    assert {(t["x1"]-t["x0"],t["y1"]-t["y0"]) for t in tiles}=={(502,536)}
     row=sorted((t for t in tiles if t["y0"]==0),key=lambda t:t["x0"])
     col=sorted((t for t in tiles if t["x0"]==0),key=lambda t:t["y0"])
-    assert row[0]["x1"]-row[1]["x0"]==64
-    assert col[0]["y1"]-col[1]["y0"]==64
-    assert row[0]["core_x1"]==row[1]["core_x0"]==704
+    assert 47<=row[0]["x1"]-row[1]["x0"]<=49
+    assert col[0]["y1"]-col[1]["y0"]==48
+    assert row[0]["core_x1"]==row[1]["core_x0"]
     assert col[0]["core_y1"]==col[1]["core_y0"]==512
-    assert all(max(t["x1"]-t["x0"],t["y1"]-t["y0"])<=768 for t in tiles)
-    with pytest.raises(CloudOCRError,match="4 облачных"):
-        balanced_cloud_tiles(1408,1024,size=768,overlap=64,max_tiles=2)
+    assert all(max(t["x1"]-t["x0"],t["y1"]-t["y0"])<=640 for t in tiles)
+    with pytest.raises(CloudOCRError,match="6 облачных"):
+        balanced_cloud_tiles(1408,1024,size=640,overlap=48,max_tiles=2)
 
 
 def test_balanced_tiling_covers_all_pixels_with_small_overlap():
@@ -258,6 +258,85 @@ def test_upgrade_previous_saved_cloud_crop_defaults(tmp_path,monkeypatch):
     folder.mkdir()
     (folder/"settings.json").write_text(json.dumps(base),encoding="utf-8")
     actual=load_settings()
-    assert actual.cloud_ocr_tile_size==768
-    assert actual.cloud_ocr_overlap==64
-    assert actual.cloud_ocr_profile_version==2
+    assert actual.cloud_ocr_tile_size==640
+    assert actual.cloud_ocr_overlap==48
+    assert actual.cloud_ocr_profile_version==3
+
+
+def test_gemini_normalized_coordinates_are_scaled_before_pptx():
+    """Synthetic version of the reported out-of-image XYXY error."""
+    tiles=balanced_cloud_tiles(736,544,size=640,overlap=48,max_tiles=4)
+    # Keep this fixture single-tile to verify exact recovered positions.
+    tile={"index":0,"x0":0,"y0":0,"x1":736,"y1":544,
+          "core_x0":0,"core_x1":736,"core_y0":0,"core_y1":544}
+    reply=CloudReply(
+        coordinate_system="normalized_1000_xyxy",
+        blocks=[
+            CloudBlock(kind="text",bbox=[40,280,103,296],text="МПРК-3"),
+            CloudBlock(kind="text",bbox=[136,724,304,828],text="Преобразователь")
+        ])
+    page,skipped=merge_blocks([tile],[reply],736,544)
+    assert not skipped
+    assert len(page["parsing_res_list"])==2
+    first=page["parsing_res_list"][0]["block_bbox"]
+    second=page["parsing_res_list"][1]["block_bbox"]
+    assert first==pytest.approx([29.44,152.32,75.808,161.024])
+    assert second==pytest.approx([100.096,393.856,223.744,450.432])
+
+
+def test_legacy_gemini_reply_with_many_out_of_range_pixels_infers_normalized_scale():
+    """22 of 32 uploaded user blocks had y>544, but all fit 0..1000."""
+    from smart_overlay.cloud_ocr import _reply_coordinates
+    tile={"x0":0,"y0":0,"x1":736,"y1":544}
+    bbox=[[40,280,103,296],[136,724,304,828],[60,624,100,640],
+          [484,844,524,860]]
+    reply=CloudReply(blocks=[
+        CloudBlock(kind="text",bbox=b,text="TEST") for b in bbox
+    ])
+    assert _reply_coordinates(reply,tile,"pixel_xyxy")=="normalized_1000_xyxy"
+    page,skipped=merge_blocks(
+        [{**tile,"index":0,"core_x0":0,"core_y0":0,
+          "core_x1":736,"core_y1":544}], [reply],736,544)
+    assert len(page["parsing_res_list"])==4
+    assert not skipped
+
+
+def test_pixel_coordinate_response_remains_unchanged_with_explicit_metadata():
+    tile={"x0":0,"y0":0,"x1":736,"y1":544,"index":0,
+          "core_x0":0,"core_y0":0,"core_x1":736,"core_y1":544}
+    reply=decode_reply('{"coordinate_system":"pixel_xyxy",'
+                       '"blocks":[["t",10,20,100,35,"Кассета"]]}')
+    page,skipped=merge_blocks([tile],[reply],736,544,
+                              fallback_coordinate_system="normalized_1000_xyxy")
+    assert not skipped
+    assert page["parsing_res_list"][0]["block_bbox"]==[10,20,100,35]
+
+
+def test_saved_cloud_defaults_v2_migrate_to_smaller_tiles(tmp_path,monkeypatch):
+    from smart_overlay.settings import load_settings
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+    base=Settings().model_dump()
+    base["cloud_ocr_profile_version"]=2
+    base["cloud_ocr_tile_size"]=768
+    base["cloud_ocr_overlap"]=64
+    folder=tmp_path/"SmartOverlayOCR"
+    folder.mkdir()
+    (folder/"settings.json").write_text(json.dumps(base),encoding="utf-8")
+    actual=load_settings()
+    assert actual.cloud_ocr_tile_size==640
+    assert actual.cloud_ocr_overlap==48
+    assert actual.cloud_ocr_profile_version==3
+
+
+def test_manual_nondefault_cloud_tiles_are_never_overridden(tmp_path,monkeypatch):
+    from smart_overlay.settings import load_settings
+    monkeypatch.setenv("LOCALAPPDATA",str(tmp_path))
+    base=Settings().model_dump()
+    base["cloud_ocr_profile_version"]=2
+    base["cloud_ocr_tile_size"]=1300
+    base["cloud_ocr_overlap"]=50
+    folder=tmp_path/"SmartOverlayOCR"
+    folder.mkdir()
+    (folder/"settings.json").write_text(json.dumps(base),encoding="utf-8")
+    actual=load_settings()
+    assert (actual.cloud_ocr_tile_size,actual.cloud_ocr_overlap)==(1300,50)
