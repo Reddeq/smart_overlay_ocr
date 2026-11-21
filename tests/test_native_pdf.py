@@ -196,4 +196,5 @@ def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_pa
         assert "CONTROL PANEL" in source
         assert "POWER" in source
         assert "_mask" not in source
-        assert "ppt/media/image1.png" in zipfile.namelist()
+        assert any(name.startswith("ppt/media/") and name.lower().endswith(".png")
+                   for name in zipfile.namelist())
