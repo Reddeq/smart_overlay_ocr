@@ -529,7 +529,7 @@ def _pdf_text_objects(fragments, groups, table_ids, samples):
 
 
 def _clean_background(raw,page_number,zoom):
-    """Preserve PDF graphics & images while removing PDF text in memory.
+    """Legacy-only PDF background cleanup, for preexisting saved projects.
 
     Transparent redaction avoids white boxes obliterating wires/table lines.
     The untouched original PDF bytes remain stored as the project's source.
@@ -568,9 +568,11 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
         texts=_pdf_text_objects(fragments,groups,table_ids,samples)
         extracted_lines=len(fragments)
         fragments=[f for f in fragments if f.id not in table_ids]+cell_fragments
-        progress("PDF: создание фона без исходного текста")
-        clean_png=_clean_background(raw,page_number,zoom)
-        source.raster_b64=base64.b64encode(clean_png).decode("ascii")
+        # The page is the ORIGINAL, unmodified PDF raster. OCR-style
+        # overlaid editable labels/tables may mask only their own original
+        # glyph footprints during PPTX export. Do NOT redact the source.
+        progress("PDF: сохранение полной страницы с исходным текстом")
+        source.raster_b64=base64.b64encode(original_png).decode("ascii")
         result=Project(source=source,fragments=fragments,objects=[*tables,*texts])
         detected_fonts=sorted({
             _font_name(sample.get("font","")) for sample in samples.values()
@@ -592,7 +594,9 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
             "grouped_text_blocks":len(texts),
             "native_tables":len(tables),
             "vector_paths":len(page.get_drawings()),
-            "text_redacted_background":True,
+            "text_redacted_background":False,
+            "background_mode":"full_original",
+            "overlay_mode":"ocr_style",
             "unresolved":skipped+table_warnings,
         }
         result.messages.append(
