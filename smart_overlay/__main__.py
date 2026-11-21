@@ -23,6 +23,9 @@ def main():
     one.add_argument("--output", type=Path)
     one.add_argument("--pdf-page", type=int, default=1,
                      help="Page number of a born-digital PDF (1-based; one slide per conversion)")
+    one.add_argument("--pdf-overlay-mode", choices=["ocr_style", "source_exact"],
+                     help="ocr_style: visible editable text; source_exact: pixel-identical original "
+                          "with transparent editable text for CAT")
     one.add_argument("--settings", type=Path)
     one.add_argument("--languages", help="Comma-separated manual OCR languages, e.g. ru,en or ch,ru")
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
@@ -142,7 +145,8 @@ def main():
             settings = Settings.model_validate({**settings.model_dump(),
                 "ocr_version": "PP-OCRv5", "ocr_language_mode": "manual",
                 "ocr_languages": codes})
-        overrides = {"vl_tile_size": args.vl_tile_size,
+        overrides = {"native_pdf_overlay_mode": args.pdf_overlay_mode,
+                     "vl_tile_size": args.vl_tile_size,
                      "vl_tile_timeout_seconds": args.vl_tile_timeout,
                      "vl_max_new_tokens": args.vl_max_new_tokens,
                      "vl_max_tiles": args.vl_max_tiles,
