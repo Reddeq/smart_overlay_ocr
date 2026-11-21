@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QVBoxLayout, QWidget, QGridLayout, QRadioButton,
+    QSpinBox,
 )
 
 from .app import Preview
@@ -234,6 +235,7 @@ class QuickWindow(QMainWindow):
         self.mode_combo.addItem("Smart OCR · обычный", "smart")
         self.mode_combo.addItem("Smart OCR · два распознавателя + VL", "hybrid_local")
         self.mode_combo.addItem("Облако · весь чертёж (эксперимент)", "cloud_full")
+        self.mode_combo.addItem("Цифровой PDF · структура без OCR", "native_pdf")
         self.mode_combo.addItem("PaddleOCR-VL 1.6 · целиком (эксперимент)", "vl_local")
         engine_index = self.mode_combo.findData(self.settings.ocr_engine)
         self.mode_combo.setCurrentIndex(max(0, engine_index))
@@ -246,6 +248,13 @@ class QuickWindow(QMainWindow):
         self.device_combo.setToolTip("GPU может потребовать более 6 ГБ видеопамяти. CPU медленнее.")
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         mode_row.addWidget(self.device_combo)
+        self.pdf_page_label = QLabel("Страница:")
+        self.pdf_page = QSpinBox()
+        self.pdf_page.setRange(1,1)
+        self.pdf_page.setToolTip("Пока одна страница PDF конвертируется в один PPTX")
+        self.pdf_page.valueChanged.connect(self.preview_pdf_page)
+        mode_row.addWidget(self.pdf_page_label)
+        mode_row.addWidget(self.pdf_page)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
@@ -264,7 +273,7 @@ class QuickWindow(QMainWindow):
         layout.addWidget(self.preview, 1)
 
         status = QHBoxLayout()
-        self.status_text = QLabel("Откройте изображение PNG, JPG, TIFF или BMP")
+        self.status_text = QLabel("Откройте изображение или цифровой PDF")
         self.status_text.setWordWrap(True)
         status.addWidget(self.status_text, 1)
         self.progress = QProgressBar()
@@ -297,10 +306,19 @@ class QuickWindow(QMainWindow):
         engine = self.mode_combo.currentData()
         local = engine in ("vl_local", "hybrid_local")
         self.settings.ocr_engine = engine
-        self.language_button.setEnabled(engine not in ("vl_local", "cloud_full") and self.worker is None)
+        self.language_button.setEnabled(engine not in ("vl_local", "cloud_full", "native_pdf") and self.worker is None)
         self.device_combo.setEnabled(local and self.worker is None)
         self.device_combo.setVisible(local)
+        pdf_selected = bool(self.path and self.path.suffix.lower() == ".pdf")
+        self.pdf_page_label.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_page.setVisible(engine == "native_pdf" and pdf_selected)
+        self.run_button.setText("Извлечь PDF → PPTX" if engine == "native_pdf"
+                                else "Распознать → PPTX")
+        if self.path and self.worker is None:
+            self.run_button.setEnabled((engine == "native_pdf") == pdf_selected)
         self.statusBar().showMessage(
+            "Цифровой PDF: прямое извлечение текста и таблиц без OCR и без облака"
+            if engine == "native_pdf" else
             "Полностью облачное OCR: модель читает изображение напрямую, запросы платные"
             if engine == "cloud_full" else
             "Гибрид: PP-OCRv5 + совместимые модели PP-OCRv6, затем пакетная VL-проверка; без облака"
@@ -345,26 +363,58 @@ class QuickWindow(QMainWindow):
             QMessageBox.warning(self, "Языки OCR", str(exc))
         self.refresh_languages()
 
+    def preview_pdf_page(self, *_):
+        if not self.path or self.path.suffix.lower() != ".pdf":
+            return
+        from .native_pdf import preview_pdf, NativePDFError
+        try:
+            project = preview_pdf(self.path,self.pdf_page.value())
+            self.preview.show_project(project,fit=True)
+        except (OSError,ValueError,NativePDFError) as exc:
+            QMessageBox.warning(self,"Страница PDF",str(exc))
+
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Выбрать чертёж", str(Path.home()),
-            "Чертежи (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)")
+            self,"Выбрать чертёж",str(Path.home()),
+            "Чертежи и цифровые PDF (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp)")
         if not path:
             return
+        selected=Path(path)
         try:
-            project = load_image(path)
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Открытие файла", str(exc))
+            if selected.suffix.lower() == ".pdf":
+                from .native_pdf import pdf_info, preview_pdf
+                details=pdf_info(path)
+                self.pdf_page.blockSignals(True)
+                self.pdf_page.setRange(1,details["pages"])
+                self.pdf_page.setValue(1)
+                self.pdf_page.blockSignals(False)
+                project=preview_pdf(path,1)
+            else:
+                project=load_image(path)
+                self.pdf_page.blockSignals(True)
+                self.pdf_page.setRange(1,1)
+                self.pdf_page.blockSignals(False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self,"Открытие файла",str(exc))
             return
-        self.path = Path(path)
+        self.path=selected
+        if selected.suffix.lower()==".pdf":
+            native_index=self.mode_combo.findData("native_pdf")
+            self.mode_combo.setCurrentIndex(native_index)
+        elif self.mode_combo.currentData()=="native_pdf":
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData("smart"))
+        self.mode_changed()
         self.file_label.setText(str(self.path))
-        self.preview.show_project(project, fit=True)
-        self.result = None
+        self.preview.show_project(project,fit=True)
+        self.result=None
         self.open_pptx.hide()
         self.review.hide()
         self.summary.setText("")
         self.run_button.setEnabled(True)
-        self.status_text.setText("Можно распознавать")
+        self.status_text.setText(
+            "Цифровой PDF: текст и таблицы будут извлечены напрямую; "
+            "исходные линии сохранятся на фоне"
+            if selected.suffix.lower()==".pdf" else "Можно распознавать")
 
     def configure(self):
         dialog = ConnectionDialog(self.settings, self.api_key, self.proxy, self.cloud_enabled, self)
@@ -432,6 +482,7 @@ class QuickWindow(QMainWindow):
             consent = answer == QMessageBox.StandardButton.Yes
 
         source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
+        pdf_page = self.pdf_page.value()
         device = self.device_combo.currentData()
         diagnostics = (data_dir() / "diagnostics" /
                        ("cloud-full" if engine == "cloud_full" else
@@ -446,6 +497,7 @@ class QuickWindow(QMainWindow):
                                                  consent=consent, proxy=proxy,
                                                  ocr_engine=engine, vl_device=device,
                                                  vl_diagnostics=diagnostics,
+                                                 pdf_page=pdf_page,
                                                  progress=report, cancelled=stop), self)
         self.worker.progress.connect(self.status_text.setText)
         self.worker.completed.connect(self.done)
