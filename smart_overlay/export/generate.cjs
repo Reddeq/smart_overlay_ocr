@@ -15,6 +15,7 @@ async function generate(project, output) {
   const slide = pptx.addSlide();
   const nativePdf = project.source.mode === 'PDF';
   const originalPdf = nativePdf && project.native_pdf_background_mode === 'full_original';
+  const sourceExact = originalPdf && project.native_pdf_overlay_mode === 'source_exact';
   const fragmentById = new Map((project.fragments || []).map(f => [f.id, f]));
   let maskCount = 0;
 
@@ -22,7 +23,7 @@ async function generate(project, output) {
   // original PDF glyphs with small OCR-like white masks, never whole table
   // cells or the entire page. OCR and legacy-cleaned PDFs are unchanged.
   function maskOriginalGlyphs(ownerId, ids, fillColor, clipPx = null) {
-    if (!originalPdf) return;
+    if (!originalPdf || sourceExact) return;
     for (const id of ids || []) {
       const fragment = fragmentById.get(id);
       if (!fragment || !fragment.text.trim()) continue;
@@ -48,6 +49,7 @@ async function generate(project, output) {
                    x: 0, y: 0, w: width, h: height, altText: project.source.filename });
   const hex = value => value.replace('#', '');
   const style = s => ({ fontFace: s.font, fontSize: s.font_size, color: hex(s.color),
+                        transparency: sourceExact ? 100 : 0,
                         fill: { color: hex(s.fill), transparency: nativePdf ? 100 : 0 }, align: s.align,
                         margin: 0, breakLine: false, valign: 'mid' });
   for (const obj of project.objects) {
@@ -102,7 +104,8 @@ async function generate(project, output) {
     }
   }
   slide.addNotes(`Original ${project.source.width} × ${project.source.height} pixels. ` +
-    (originalPdf ? 'Born-digital PDF: ENTIRE original page (including all ink) is the base image; extracted labels and tables are editable OCR-style overlays with localized glyph masks.'
+    (sourceExact ? 'Born-digital PDF: source page looks exact; editable text/cells have transparent ink until manually revealed.'
+                 : originalPdf ? 'Born-digital PDF: ENTIRE original page (including all ink) is the base image; extracted labels and tables are editable OCR-style overlays with localized glyph masks.'
                  : nativePdf ? 'Legacy native PDF: older text-cleaned base image with editable overlays.'
                  : `For raster export use ${1/scale} DPI. OCR and table cells are editable overlays.`));
   await pptx.writeFile({ fileName: output, compression: true });
