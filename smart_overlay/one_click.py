@@ -179,6 +179,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         progress("PDF: чтение исходного текста и векторной структуры")
         source_project = native_pdf_project(source,pdf_page,zoom=PDF_ZOOM,
                                             progress=progress)
+        source_project.raw["native_pdf"]["overlay_mode"] = settings.native_pdf_overlay_mode
         # 2 source pixels per PDF point => 144px / physical inch.
         settings.inches_per_pixel = 1 / (72 * PDF_ZOOM)
     else:
