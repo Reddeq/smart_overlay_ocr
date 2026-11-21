@@ -51,6 +51,9 @@ def export_pptx(project: Project, output: str | Path, settings: Settings, *, all
     payload["native_pdf_background_mode"] = (
         project.raw.get("native_pdf", {}).get("background_mode", "legacy_cleaned")
         if project.source.mode == "PDF" else None)
+    payload["native_pdf_overlay_mode"] = (
+        project.raw.get("native_pdf", {}).get("overlay_mode", "ocr_style")
+        if project.source.mode == "PDF" else None)
     for obj in payload["objects"]:
         if obj["type"] == "text":
             original = next(o for o in project.objects if o.id == obj["id"])
