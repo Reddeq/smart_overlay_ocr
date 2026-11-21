@@ -223,3 +223,55 @@ def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_pa
         assert "<a:solidFill>" in source
         assert any(name.startswith("ppt/media/") and name.lower().endswith(".png")
                    for name in zipfile.namelist())
+
+
+
+def test_exact_source_pdf_uses_original_raster_and_transparent_editable_shapes(live_pdf,tmp_path):
+    """Exact original appearance is possible without embedding restricted fonts.
+
+    PowerPoint text is still editable and CAT-extractable, but remains
+    invisible until switched to OCR-style export for translated output.
+    """
+    import shutil
+    import xml.etree.ElementTree as ET
+    from smart_overlay.export import export_pptx
+    if not shutil.which("node"):
+        pytest.skip("Node.js unavailable")
+    project=native_pdf_project(live_pdf)
+    project.raw["native_pdf"]["overlay_mode"]="source_exact"
+    target=tmp_path/"source_exact.pptx"
+    export_pptx(project,target,Settings(inches_per_pixel=1/144),
+                allow_unreviewed=True,inline_text_fill=True)
+    ns={"p":"http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(target) as z:
+        root=ET.fromstring(z.read("ppt/slides/slide1.xml"))
+        names=[x.get("name") for x in root.findall(
+            ".//p:sp/p:nvSpPr/p:cNvPr",ns)]
+        # No masks: original glyphs stay visible unaltered.
+        assert not [name for name in names if "_mask_" in name]
+        assert len(root.findall(".//p:sp",ns))==sum(
+            isinstance(o,Text) for o in project.objects)
+        assert len(root.findall(".//a:tbl",ns))==sum(
+            isinstance(o,Table) for o in project.objects)
+        # PptxGenJS must set transparent ink (DrawingML alpha val=0).
+        alpha=[x.get("val") for x in root.findall(".//a:alpha",ns)]
+        assert "0" in alpha
+        xml=z.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert "CONTROL PANEL" in xml
+        assert "POWER" in xml
+        assert any(n.startswith("ppt/media/") and n.endswith(".png")
+                   for n in z.namelist())
+    assert ImageChops.difference(
+        source_image(project),source_image(preview_pdf(live_pdf))).getbbox() is None
+
+
+def test_native_pdf_font_name_is_not_embedded_without_licensed_font(live_pdf,tmp_path):
+    """PDF font family is metadata; never pretend that writing its name
+    makes PowerPoint contain the actual glyph program.
+    """
+    project=native_pdf_project(live_pdf)
+    native=next(obj for obj in project.objects if isinstance(obj,Text))
+    native.style.font="GOSTTypeA"
+    assert native.style.font=="GOSTTypeA"
+    assert project.raw["native_pdf"]["background_mode"]=="full_original"
