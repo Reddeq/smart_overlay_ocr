@@ -256,6 +256,17 @@ class QuickWindow(QMainWindow):
         self.pdf_page.valueChanged.connect(self.preview_pdf_page)
         mode_row.addWidget(self.pdf_page_label)
         mode_row.addWidget(self.pdf_page)
+        self.pdf_overlay_combo = QComboBox()
+        self.pdf_overlay_combo.addItem("Видимые надписи · как OCR", "ocr_style")
+        self.pdf_overlay_combo.addItem("Точный оригинал · невидимые редактируемые слои", "source_exact")
+        index = self.pdf_overlay_combo.findData(self.settings.native_pdf_overlay_mode)
+        self.pdf_overlay_combo.setCurrentIndex(max(0,index))
+        self.pdf_overlay_combo.setToolTip(
+            "Точный оригинал: редактируемые текстовые объекты присутствуют, "
+            "но их цвет полностью прозрачен. Для видимого перевода "
+            "выбирайте «как OCR».")
+        self.pdf_overlay_combo.currentIndexChanged.connect(self.pdf_overlay_changed)
+        mode_row.addWidget(self.pdf_overlay_combo)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
@@ -313,6 +324,7 @@ class QuickWindow(QMainWindow):
         pdf_selected = bool(self.path and self.path.suffix.lower() == ".pdf")
         self.pdf_page_label.setVisible(engine == "native_pdf" and pdf_selected)
         self.pdf_page.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_overlay_combo.setVisible(engine == "native_pdf" and pdf_selected)
         self.run_button.setText("Извлечь PDF → PPTX" if engine == "native_pdf"
                                 else "Распознать → PPTX")
         if self.path and self.worker is None:
@@ -326,6 +338,10 @@ class QuickWindow(QMainWindow):
             if engine == "hybrid_local" else
             "VL полностью локальный: экспериментальный режим для небольших листов"
             if engine == "vl_local" else "Smart OCR готов")
+        self._save_mode()
+
+    def pdf_overlay_changed(self, *_):
+        self.settings.native_pdf_overlay_mode = self.pdf_overlay_combo.currentData()
         self._save_mode()
 
     def device_changed(self, *_):
@@ -509,7 +525,8 @@ class QuickWindow(QMainWindow):
 
     def set_busy(self, busy):
         for widget in (self.pick, self.run_button, self.config,
-                       self.language_button, self.mode_combo, self.device_combo):
+                       self.language_button, self.mode_combo, self.device_combo,
+                       self.pdf_page, self.pdf_overlay_combo):
             widget.setEnabled(not busy)
         self.progress.setVisible(busy)
         self.cancel.setVisible(busy)
@@ -530,6 +547,9 @@ class QuickWindow(QMainWindow):
         notes = [f"Готово: {result.pptx.name}",
                  f"Объектов: {len(result.project.objects)}; на проверку: {result.needs_review}."]
         if result.project.source.mode == "PDF":
+            if result.project.raw.get("native_pdf",{}).get("overlay_mode")=="source_exact":
+                notes.append("Точный оригинал: редактируемый текст невидим. "
+                             "Для видимого перевода требуется экспорт «как OCR».")
             detected=result.project.raw.get("native_pdf",{}).get("source_fonts",[])
             installed={re.sub(r"[^a-z0-9]","",family.lower())
                        for family in QFontDatabase.families()}
