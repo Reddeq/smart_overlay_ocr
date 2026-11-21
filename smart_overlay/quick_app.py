@@ -5,11 +5,12 @@ workflow. Advanced experiments and diagnostics remain CLI-only.
 """
 import os
 import json
+import re
 from uuid import uuid4
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -528,6 +529,17 @@ class QuickWindow(QMainWindow):
         self.review.show()
         notes = [f"Готово: {result.pptx.name}",
                  f"Объектов: {len(result.project.objects)}; на проверку: {result.needs_review}."]
+        if result.project.source.mode == "PDF":
+            detected=result.project.raw.get("native_pdf",{}).get("source_fonts",[])
+            installed={re.sub(r"[^a-z0-9]","",family.lower())
+                       for family in QFontDatabase.families()}
+            missing=[family for family in detected
+                     if re.sub(r"[^a-z0-9]","",family.lower()) not in installed]
+            if missing:
+                notes.append("Для точного совпадения шрифтов установите "
+                             "их лицензированные версии в Windows: "+
+                             ", ".join(missing[:4])+
+                             ". Без них PowerPoint подставляет другой шрифт.")
         if result.warnings:
             notes.append("Замечания: " + "; ".join(result.warnings[:2]))
             if len(result.warnings) > 2:
