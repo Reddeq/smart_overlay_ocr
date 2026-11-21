@@ -14,6 +14,36 @@ async function generate(project, output) {
   pptx.lang = 'en-US';
   const slide = pptx.addSlide();
   const nativePdf = project.source.mode === 'PDF';
+  const originalPdf = nativePdf && project.native_pdf_background_mode === 'full_original';
+  const fragmentById = new Map((project.fragments || []).map(f => [f.id, f]));
+  let maskCount = 0;
+
+  // Full native PDF is the untouched page raster. Replace ONLY the ink of
+  // original PDF glyphs with small OCR-like white masks, never whole table
+  // cells or the entire page. OCR and legacy-cleaned PDFs are unchanged.
+  function maskOriginalGlyphs(ownerId, ids, fillColor, clipPx = null) {
+    if (!originalPdf) return;
+    for (const id of ids || []) {
+      const fragment = fragmentById.get(id);
+      if (!fragment || !fragment.text.trim()) continue;
+      const b = fragment.bbox;
+      const pad = Math.min(0.8, Math.max(0.15, b.h * 0.025));
+      const inset = 0.6;
+      const x0 = Math.max(0, b.x - pad, clipPx ? clipPx.x + inset : 0);
+      const y0 = Math.max(0, b.y - pad, clipPx ? clipPx.y + inset : 0);
+      const x1 = Math.min(project.source.width, b.x + b.w + pad,
+                          clipPx ? clipPx.x + clipPx.w - inset : project.source.width);
+      const y1 = Math.min(project.source.height, b.y + b.h + pad,
+                          clipPx ? clipPx.y + clipPx.h - inset : project.source.height);
+      if (x1 <= x0 || y1 <= y0) continue;
+      slide.addShape(pptx.ShapeType.rect, {
+        x: x0*scale, y: y0*scale, w: (x1-x0)*scale, h: (y1-y0)*scale,
+        fill: { color: hex(fillColor) },
+        line: { color: hex(fillColor), transparency: 100 },
+        objectName: `${ownerId}_mask_${maskCount++}`
+      });
+    }
+  }
   slide.addImage({ data: `${project.source.raster_mime};base64,${project.source.raster_b64}`,
                    x: 0, y: 0, w: width, h: height, altText: project.source.filename });
   const hex = value => value.replace('#', '');
@@ -28,6 +58,7 @@ async function generate(project, output) {
     const b = obj.type === 'text' && obj.frame ? obj.frame : obj.bbox;
     const position = { x: b.x*scale, y: b.y*scale, w: b.w*scale, h: b.h*scale };
     if (obj.type === 'text') {
+      if (originalPdf) maskOriginalGlyphs(obj.id, obj.ocr_ids, obj.style.fill);
       if (!nativePdf && !project.inline_text_fill) for (const mask of obj.masks || []) {
         slide.addShape(pptx.ShapeType.rect, {
           x: mask.x*scale, y: mask.y*scale, w: mask.w*scale, h: mask.h*scale,
@@ -43,6 +74,19 @@ async function generate(project, output) {
                      paraSpaceAfterPt: 0, charSpacing: 0, wrap: true,
                      objectName: obj.id, isTextBox: true });
     } else if (obj.type === 'table') {
+      if (originalPdf) {
+        // Mask only PDF characters within their native cell footprint.
+        // The original ruled table stays completely visible beneath the
+        // transparent PPTX table, including every merged-cell separator.
+        for (const cell of obj.cells) {
+          const left = obj.bbox.x + obj.col_widths.slice(0,cell.col).reduce((x,y) => x+y,0);
+          const top = obj.bbox.y + obj.row_heights.slice(0,cell.row).reduce((x,y) => x+y,0);
+          const widthPx = obj.col_widths.slice(cell.col,cell.col+cell.colspan).reduce((x,y) => x+y,0);
+          const heightPx = obj.row_heights.slice(cell.row,cell.row+cell.rowspan).reduce((x,y) => x+y,0);
+          maskOriginalGlyphs(obj.id, cell.ocr_ids, cell.style.fill,
+                             { x:left, y:top, w:widthPx, h:heightPx });
+        }
+      }
       // Omit covered positions. PptxGenJS inserts native hMerge/vMerge cells.
       const rows = Array.from({ length: obj.rows }, (_, r) => obj.cells
         .filter(c => c.row === r).sort((a,b) => a.col-b.col)
@@ -58,8 +102,9 @@ async function generate(project, output) {
     }
   }
   slide.addNotes(`Original ${project.source.width} × ${project.source.height} pixels. ` +
-    (nativePdf ? 'Born-digital PDF: vector drawing is preserved in a text-free raster; source text/tables are native editable shapes.'
-               : `For raster export use ${1/scale} DPI. OCR and table cells are editable overlays.`));
+    (originalPdf ? 'Born-digital PDF: ENTIRE original page (including all ink) is the base image; extracted labels and tables are editable OCR-style overlays with localized glyph masks.'
+                 : nativePdf ? 'Legacy native PDF: older text-cleaned base image with editable overlays.'
+                 : `For raster export use ${1/scale} DPI. OCR and table cells are editable overlays.`));
   await pptx.writeFile({ fileName: output, compression: true });
 }
 
