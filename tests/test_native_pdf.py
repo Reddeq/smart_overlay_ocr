@@ -254,9 +254,17 @@ def test_exact_source_pdf_uses_original_raster_and_transparent_editable_shapes(l
             isinstance(o,Text) for o in project.objects)
         assert len(root.findall(".//a:tbl",ns))==sum(
             isinstance(o,Table) for o in project.objects)
-        # PptxGenJS must set transparent ink (DrawingML alpha val=0).
-        alpha=[x.get("val") for x in root.findall(".//a:alpha",ns)]
-        assert "0" in alpha
+        # Verify transparency on actual text runs (not just shape borders).
+        visible_runs=[]
+        for run in root.findall(".//a:r",ns):
+            if run.find("a:t",ns) is None:
+                continue
+            props=run.find("a:rPr",ns)
+            alpha=props.find(".//a:alpha",ns) if props is not None else None
+            if alpha is None or alpha.get("val")!="0":
+                visible_runs.append("".join(t.text or "" for t in
+                                            run.findall("a:t",ns)))
+        assert not visible_runs, f"Source-exact text is not transparent: {visible_runs[:4]}"
         xml=z.read("ppt/slides/slide1.xml").decode("utf-8")
         assert "CONTROL PANEL" in xml
         assert "POWER" in xml
