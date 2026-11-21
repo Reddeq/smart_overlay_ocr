@@ -67,7 +67,8 @@ def test_native_pdf_extracts_real_multiline_labels_and_merged_cells(live_pdf):
     assert len(project.fragments)>=7
     assert project.raw["native_pdf"]["page"]==1
     assert project.raw["native_pdf"]["pages"]==2
-    assert project.raw["native_pdf"]["text_redacted_background"]
+    assert project.raw["native_pdf"]["text_redacted_background"] is False
+    assert project.raw["native_pdf"]["background_mode"] == "full_original"
     assert project.raw["native_pdf"]["vector_paths"]>0
     tables=[o for o in project.objects if isinstance(o,Table)]
     assert len(tables)>=1
@@ -82,19 +83,18 @@ def test_native_pdf_extracts_real_multiline_labels_and_merged_cells(live_pdf):
     assert sum(len(o.ocr_ids) for o in project.objects)==len(project.fragments)
 
 
-def test_background_removes_glyphs_but_keeps_vector_wires(live_pdf):
+def test_background_keeps_every_pixel_of_original_drawing_including_glyphs(live_pdf):
     project=native_pdf_project(live_pdf)
-    clean=source_image(project)
+    result=source_image(project)
     full=source_image(preview_pdf(live_pdf))
-    assert clean.size==full.size==(1200,800)
-    # Source letters have been redacted, preserving the crossing line.
-    glyph=(65,108)
-    assert ImageChops.difference(clean,full).getbbox() is not None
-    assert min(clean.getpixel((80,140)))<180  # native line at y=70pt
-    # Most of a glyph-only zone should be blank now.
-    assert sum(1 for y in range(100,130) for x in range(50,260)
-               if min(clean.getpixel((x,y)))<180) < 100
-    assert project.raw["native_pdf"]["text_redacted_background"]
+    assert result.size==full.size==(1200,800)
+    # The full original image is the PPTX underlay, not a redacted PDF.
+    assert ImageChops.difference(result,full).getbbox() is None
+    assert min(result.getpixel((80,140)))<180  # crossing vector line survives
+    assert any(min(result.getpixel((x,y)))<180
+               for y in range(105,135) for x in range(47,260))
+    assert project.raw["native_pdf"]["text_redacted_background"] is False
+    assert project.raw["native_pdf"]["background_mode"] == "full_original"
 
 
 def test_pdf_second_page_and_invalid_rotation_are_explicit(live_pdf,tmp_path):
@@ -127,6 +127,22 @@ def test_scanned_pdf_rejected_before_ocr(tmp_path):
     document.save(path)
     with pytest.raises(NativePDFError,match="нет извлекаемого текста"):
         native_pdf_project(path)
+
+
+def test_legacy_text_cleaned_pdf_project_still_opens(live_pdf,tmp_path):
+    from smart_overlay.native_pdf import _clean_background
+    project=native_pdf_project(live_pdf)
+    original=base64.b64decode(project.source.original_b64)
+    cleaned=_clean_background(original,1,2.0)
+    project.source.raster_b64=base64.b64encode(cleaned).decode("ascii")
+    project.raw["native_pdf"]["background_mode"]="legacy_cleaned"
+    project.raw["native_pdf"]["text_redacted_background"]=True
+    dest=tmp_path/"legacy.socr.json"
+    save_project(project,dest)
+    loaded=open_project(dest)
+    assert loaded.raw["native_pdf"]["background_mode"]=="legacy_cleaned"
+    assert ImageChops.difference(source_image(loaded),
+                                 source_image(preview_pdf(live_pdf))).getbbox()
 
 
 def test_native_pdf_project_roundtrip_validates_source_pdf(live_pdf,tmp_path):
@@ -189,12 +205,20 @@ def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_pa
         root=ET.fromstring(zipfile.read("ppt/slides/slide1.xml"))
         shape_nodes=root.findall(".//p:sp",namespaces)
         table_nodes=root.findall(".//a:tbl",namespaces)
-        assert len(shape_nodes)==len(native_texts)
+        object_names=root.xpath(".//p:sp/p:nvSpPr/p:cNvPr/@name",namespaces)
+        masks=[name for name in object_names if "_mask_" in name]
+        # Editable text shapes PLUS per-source-glyph masks, with no
+        # cleaned background or opaque whole-cell rectangle.
+        assert len(shape_nodes)==len(native_texts)+len(masks)
+        assert len(masks)>=len(native_texts)
         assert len(table_nodes)==len(native_tables)
         assert table_nodes[0].find(".//a:tc[@gridSpan='2']",namespaces) is not None
         source=zipfile.read("ppt/slides/slide1.xml").decode("utf-8")
         assert "CONTROL PANEL" in source
         assert "POWER" in source
-        assert "_mask" not in source
+        assert "_mask_" in source
+        # PowerPoint keeps the actual PDF font family name, but the full
+        # unmodified source glyphs also remain in its picture underlay.
+        assert "<a:solidFill>" in source
         assert any(name.startswith("ppt/media/") and name.lower().endswith(".png")
                    for name in zipfile.namelist())
