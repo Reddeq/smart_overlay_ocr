@@ -13,6 +13,7 @@ async function generate(project, output) {
   pptx.subject = 'Editable OCR overlays; original raster preserved';
   pptx.lang = 'en-US';
   const slide = pptx.addSlide();
+  const nativePdf = project.source.mode === 'PDF';
   slide.addImage({ data: `${project.source.raster_mime};base64,${project.source.raster_b64}`,
                    x: 0, y: 0, w: width, h: height, altText: project.source.filename });
   const hex = value => value.replace('#', '');
@@ -27,7 +28,7 @@ async function generate(project, output) {
     const b = obj.type === 'text' && obj.frame ? obj.frame : obj.bbox;
     const position = { x: b.x*scale, y: b.y*scale, w: b.w*scale, h: b.h*scale };
     if (obj.type === 'text') {
-      if (!project.inline_text_fill) for (const mask of obj.masks || []) {
+      if (!nativePdf && !project.inline_text_fill) for (const mask of obj.masks || []) {
         slide.addShape(pptx.ShapeType.rect, {
           x: mask.x*scale, y: mask.y*scale, w: mask.w*scale, h: mask.h*scale,
           fill: { color: hex(obj.style.fill) },
@@ -36,7 +37,8 @@ async function generate(project, output) {
         });
       }
       slide.addText(obj.text, { ...position, ...style(obj.style), rotate: (obj.rotation+360)%360,
-                     fill: { color: hex(obj.style.fill), transparency: project.inline_text_fill ? 0 : 100 },
+                     fill: { color: hex(obj.style.fill),
+                             transparency: nativePdf ? 100 : (project.inline_text_fill ? 0 : 100) },
                      line: { color: hex(obj.style.fill), transparency: 100 },
                      paraSpaceAfterPt: 0, charSpacing: 0, wrap: true,
                      objectName: obj.id, isTextBox: true });
@@ -56,7 +58,8 @@ async function generate(project, output) {
     }
   }
   slide.addNotes(`Original ${project.source.width} × ${project.source.height} pixels. ` +
-    `For raster export use ${1/scale} DPI. OCR and table cells are editable overlays.`);
+    (nativePdf ? 'Born-digital PDF: vector drawing is preserved in a text-free raster; source text/tables are native editable shapes.'
+               : `For raster export use ${1/scale} DPI. OCR and table cells are editable overlays.`));
   await pptx.writeFile({ fileName: output, compression: true });
 }
 
