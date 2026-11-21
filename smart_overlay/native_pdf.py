@@ -321,7 +321,10 @@ def _cell_content(characters,zoom,width,height):
     xe=[float(ch["bbox"][2]) for ch in characters]
     ye=[float(ch["bbox"][3]) for ch in characters]
     bbox=_safe_rect((min(xs),min(ys),max(xe),max(ye)),width,height,zoom)
-    caution=len(weighted)>2 or any("\ufffd" in ch["char"] for ch in characters)
+    caution=(len(weighted)>2 or
+             any("\ufffd" in ch["char"] or
+                 any("\uac00"<=letter<="\ud7af" for letter in ch["char"])
+                 for ch in characters))
     return text,style,bbox,caution
 
 
@@ -383,6 +386,14 @@ def _table_from_grid(grid,original_fragments,characters,source,zoom):
                 _rect_overlap(_pdf_lib().Rect(grid.bbox),rect)>=.48*area):
             original_ids.add(frag.id)
     if not original_ids:
+        return None
+    # PDF glyphs removed from the background MUST have an editable replacement.
+    # If cell extraction lost a substantial part, reject this proposal rather
+    # than silently deleting the original text from the final PowerPoint.
+    original_count=sum(len("".join(f.text.split()))
+                       for f in original_fragments if f.id in original_ids)
+    recovered_count=sum(len("".join(cell.text.split())) for cell in cells)
+    if original_count and recovered_count < original_count*.90:
         return None
     box=_safe_rect(grid.bbox,source.width,source.height,zoom)
     if box is None:
