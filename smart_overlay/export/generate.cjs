@@ -18,7 +18,7 @@ async function generate(project, output) {
                    x: 0, y: 0, w: width, h: height, altText: project.source.filename });
   const hex = value => value.replace('#', '');
   const style = s => ({ fontFace: s.font, fontSize: s.font_size, color: hex(s.color),
-                        fill: { color: hex(s.fill), transparency: 0 }, align: s.align,
+                        fill: { color: hex(s.fill), transparency: nativePdf ? 100 : 0 }, align: s.align,
                         margin: 0, breakLine: false, valign: 'mid' });
   for (const obj of project.objects) {
     if (obj.excluded) continue;
@@ -48,8 +48,8 @@ async function generate(project, output) {
         .filter(c => c.row === r).sort((a,b) => a.col-b.col)
         .map(c => ({ text: c.text, options: { ...style(c.style),
           rowspan: c.rowspan, colspan: c.colspan,
-          border: { type: c.style.border_pt ? 'solid' : 'none',
-                    pt: c.style.border_pt, color: hex(c.style.border_color) } } })));
+          border: { type: nativePdf ? 'none' : (c.style.border_pt ? 'solid' : 'none'),
+                    pt: nativePdf ? 0 : c.style.border_pt, color: hex(c.style.border_color) } } })));
       slide.addTable(rows, { ...position, margin: 0, autoPage: false,
                        colW: obj.col_widths.map(v => v*scale),
                        rowH: obj.row_heights.map(v => v*scale),
