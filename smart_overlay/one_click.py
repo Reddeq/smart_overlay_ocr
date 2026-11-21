@@ -152,6 +152,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
                     consent: bool = False, proxy: str | None = None,
                     ocr_engine: str | None = None, vl_device: str | None = None,
                     vl_diagnostics: str | Path | None = None,
+                    pdf_page: int = 1,
                     max_requests: int = 24,
                     progress: Callable[[str], None] = lambda _: None,
                     cancelled: Callable[[], bool] = lambda: False) -> OneClickResult:
