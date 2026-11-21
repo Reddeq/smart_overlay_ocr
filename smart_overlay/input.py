@@ -57,10 +57,25 @@ def open_project(path: str | Path) -> Project:
     raster = source_image(project)
     if raster.size != (project.source.width, project.source.height):
         raise ValueError("Размер изображения в проекте не совпадает с метаданными")
-    with Image.open(io.BytesIO(raw)) as original:
-        expected = ImageOps.exif_transpose(original).convert("RGB")
-        if expected.size != raster.size or ImageChops.difference(expected, raster).getbbox():
-            raise ValueError("Отображаемый растр не соответствует исходному изображению")
+    if project.source.mode == "PDF":
+        from .native_pdf import _clean_background
+        info = project.raw.get("native_pdf")
+        if not isinstance(info, dict) or "page" not in info or "zoom" not in info:
+            raise ValueError("PDF проект не содержит номера страницы и масштаба")
+        try:
+            cleaned = _clean_background(raw, int(info["page"]), float(info["zoom"]))
+            with Image.open(io.BytesIO(cleaned)) as rendered:
+                expected = rendered.convert("RGB")
+                if (expected.size != raster.size or
+                        ImageChops.difference(expected, raster).getbbox()):
+                    raise ValueError("Фон PDF проекта не соответствует исходнику")
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise ValueError("Не удалось проверить исходный PDF проекта") from exc
+    else:
+        with Image.open(io.BytesIO(raw)) as original:
+            expected = ImageOps.exif_transpose(original).convert("RGB")
+            if expected.size != raster.size or ImageChops.difference(expected, raster).getbbox():
+                raise ValueError("Отображаемый растр не соответствует исходному изображению")
     validate_project(project)
     return project
 
