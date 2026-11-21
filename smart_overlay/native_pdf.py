@@ -88,10 +88,16 @@ def _render_png(page, zoom):
 
 
 def _make_source(raw,path,png,page,zoom):
+    # PyMuPDF raster rounds fractional PDF point dimensions to actual pixels.
+    # Use exact PNG dimensions rather than approximating with round().
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(png)) as rendered:
+        width,height=rendered.size
     return Source(
         filename=Path(path).name,
-        width=round(page.rect.width*zoom),
-        height=round(page.rect.height*zoom),
+        width=width,
+        height=height,
         mode="PDF",
         orientation=1,
         sha256=hashlib.sha256(raw).hexdigest(),
@@ -383,12 +389,7 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
         progress("PDF: извлечение текстовых блоков")
         # PNG dimensions use PyMuPDF's pixel rounding convention.
         original_png=_render_png(page,zoom)
-        from PIL import Image
-        import io
-        with Image.open(io.BytesIO(original_png)) as image:
-            width,height=image.size
         source=_make_source(raw,path,original_png,page,zoom)
-        source.width=width;source.height=height
         fragments,groups,samples,skipped=_read_lines(page,source,zoom)
         if not fragments:
             raise NativePDFError(
