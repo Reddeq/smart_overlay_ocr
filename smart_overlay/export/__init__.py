@@ -45,6 +45,12 @@ def export_pptx(project: Project, output: str | Path, settings: Settings, *, all
     payload = project.model_dump()
     payload["allow_unreviewed"] = allow_unreviewed
     payload["inline_text_fill"] = inline_text_fill
+    # Distinguish the new full-original PDF background from older cleaned
+    # projects. Only the new mode needs OCR-style masks on top of original
+    # glyphs; all OCR/raster export modes remain untouched.
+    payload["native_pdf_background_mode"] = (
+        project.raw.get("native_pdf", {}).get("background_mode", "legacy_cleaned")
+        if project.source.mode == "PDF" else None)
     for obj in payload["objects"]:
         if obj["type"] == "text":
             original = next(o for o in project.objects if o.id == obj["id"])
