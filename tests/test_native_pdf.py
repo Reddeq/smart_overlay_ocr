@@ -168,3 +168,32 @@ def test_bad_pdf_header_and_empty_table_do_not_guess(tmp_path):
     fake.write_bytes(b"this is not a PDF")
     with pytest.raises(NativePDFError,match="заголовка PDF"):
         native_pdf_project(fake)
+
+
+def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_path):
+    """Inspects real PresentationML, not a mocked PowerPoint export."""
+    import shutil
+    import xml.etree.ElementTree as ET
+    from smart_overlay.export import export_pptx
+    if not shutil.which("node"):
+        pytest.skip("Node.js is not available")
+    project=native_pdf_project(live_pdf)
+    native_texts=[o for o in project.objects if isinstance(o,Text)]
+    native_tables=[o for o in project.objects if isinstance(o,Table)]
+    dest=tmp_path/"digital.pptx"
+    export_pptx(project,dest,Settings(inches_per_pixel=1/144),
+                allow_unreviewed=True,inline_text_fill=True)
+    namespaces={"p":"http://schemas.openxmlformats.org/presentationml/2006/main",
+                "a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(dest) as zipfile:
+        root=ET.fromstring(zipfile.read("ppt/slides/slide1.xml"))
+        shape_nodes=root.findall(".//p:sp",namespaces)
+        table_nodes=root.findall(".//a:tbl",namespaces)
+        assert len(shape_nodes)==len(native_texts)
+        assert len(table_nodes)==len(native_tables)
+        assert table_nodes[0].find(".//a:tc[@gridSpan='2']",namespaces) is not None
+        source=zipfile.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert "CONTROL PANEL" in source
+        assert "POWER" in source
+        assert "_mask" not in source
+        assert "ppt/media/image1.png" in zipfile.namelist()
