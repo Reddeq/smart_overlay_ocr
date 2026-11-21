@@ -9,7 +9,8 @@ Currently one PDF page per PowerPoint slide/file.
 from __future__ import annotations
 
 import base64
-from collections import defaultdict
+from collections import Counter, defaultdict
+from bisect import bisect_right
 import hashlib
 import math
 from pathlib import Path
@@ -17,6 +18,7 @@ from statistics import median
 
 from .models import Box, Cell, Fragment, Project, Source, Style, Table, Text, uid
 from .structure import validate_project
+from .vector_grid import GridCell, VectorGrid, discover_vector_grids
 
 PDF_ZOOM = 2.0
 MAX_PDF_BYTES = 64 * 1024 * 1024
@@ -143,9 +145,13 @@ def _pdf_color(value):
 
 
 def _font_name(value):
-    name=(value or "").split("+")[-1]
-    return name if name in ("Arial","Helvetica","Times-Roman","Courier",
-                            "Times New Roman","Calibri") else "Arial"
+    """Keep the actual embedded PDF font family instead of replacing with Arial.
+
+    An installed matching font on the PowerPoint machine is needed for an exact
+    visual match. The PDF font program itself is not bundled or redistributed.
+    """
+    name=(value or "").split("+")[-1].split(",")[0].strip()
+    return name or "Arial"
 
 
 def _line_rotation(line):
@@ -214,110 +220,220 @@ def _fragment_pdf_bbox(frag,zoom):
     return fitz.Rect(box.x/zoom,box.y/zoom,box.right/zoom,box.bottom/zoom)
 
 
-def _native_tables(page, fragments, zoom):
-    """Rebuild merged native PowerPoint cells from actual PDF line geometry.
-
-    Reject inaccurate/ambiguous proposals, retaining text as ordinary editable
-    objects instead of guessing merges. Uses direct PDF cell rectangles.
-    """
+def _fallback_grids(page):
+    """Small/simple tables PyMuPDF detects without CAD-style repeated strokes."""
     fitz=_pdf_lib()
     try:
         detections=page.find_tables(strategy="lines").tables
-    except (RuntimeError,ValueError,AttributeError) as exc:
-        return [],set(),[f"PDF find_tables: {type(exc).__name__}"]
-    found=[]
-    assigned=set()
-    rejected=[]
-    for index,table in enumerate(detections):
-        if table.row_count<2 or table.col_count<1:
+    except (RuntimeError, ValueError, AttributeError):
+        return []
+    proposals=[]
+    for table in detections:
+        bbox=tuple(float(v) for v in table.bbox)
+        if ((bbox[2]-bbox[0])*(bbox[3]-bbox[1]) >
+                .24*page.rect.get_area() or
+                table.row_count<2 or table.col_count<1):
+            continue  # The outside page frame is NOT one giant table.
+        raw=[fitz.Rect(rect) for row in table.rows
+             for rect in row.cells if rect]
+        if not raw:
             continue
-        raw_cells=[fitz.Rect(cell) for row in table.rows
-                   for cell in row.cells if cell is not None]
-        if not raw_cells:
+        xedges=_cluster_pdf_edges([bbox[0],bbox[2]]+
+            [v for rect in raw for v in (rect.x0,rect.x1)])
+        yedges=_cluster_pdf_edges([bbox[1],bbox[3]]+
+            [v for rect in raw for v in (rect.y0,rect.y1)])
+        nr,nc=len(yedges)-1,len(xedges)-1
+        if nr<2 or nc<1 or nr*nc>1600:
             continue
-        bbox=fitz.Rect(table.bbox)
-        xedges=_edges([bbox.x0,bbox.x1]+[v for c in raw_cells for v in (c.x0,c.x1)])
-        yedges=_edges([bbox.y0,bbox.y1]+[v for c in raw_cells for v in (c.y0,c.y1)])
-        cols,rows=len(xedges)-1,len(yedges)-1
-        if not (1<=cols<=100 and 2<=rows<=500):
-            rejected.append(f"Таблица #{index}: слишком сложная сетка")
-            continue
-        possible=[]
         occupied=set()
-        for rect in raw_cells:
-            c0=_edge_index(xedges,rect.x0); c1=_edge_index(xedges,rect.x1)
-            r0=_edge_index(yedges,rect.y0); r1=_edge_index(yedges,rect.y1)
-            if c1<=c0 or r1<=r0:
-                continue
+        cells=[]
+        for rect in raw:
+            c0=_edge_index(xedges,rect.x0)
+            c1=_edge_index(xedges,rect.x1)
+            r0=_edge_index(yedges,rect.y0)
+            r1=_edge_index(yedges,rect.y1)
+            if c0>=c1 or r0>=r1:
+                break
             footprint={(r,c) for r in range(r0,r1) for c in range(c0,c1)}
             if footprint & occupied:
-                possible=[]
                 break
-            occupied.update(footprint)
-            possible.append((rect,r0,c0,r1-r0,c1-c0))
-        if not possible or len(occupied)!=rows*cols:
-            rejected.append(f"Таблица #{index}: неоднозначные объединения")
+            occupied|=footprint
+            cells.append(GridCell(r0,c0,r1-r0,c1-c0,tuple(rect)))
+        if len(occupied)!=nr*nc:
             continue
-        table_fragments=[frag for frag in fragments
-                         if frag.id not in assigned and
-                         _rect_overlap(bbox,_fragment_pdf_bbox(frag,zoom))>
-                         .48*frag.bbox.w*frag.bbox.h/(zoom*zoom)]
-        if len(table_fragments)<2:
-            # Diagram wires can accidentally be identified as empty tables.
+        proposals.append(VectorGrid(
+            (xedges[0],yedges[0],xedges[-1],yedges[-1]),
+            tuple(xedges),tuple(yedges),tuple(cells),"pymupdf_lines"))
+    return proposals
+
+
+def _cluster_pdf_edges(values):
+    from .vector_grid import _cluster
+    return _cluster(values,.7)
+
+
+def _raw_pdf_characters(page):
+    """Direct PDF glyphs, retaining the font and text order of each line."""
+    raw=[]
+    for bi,block in enumerate(page.get_text("rawdict",sort=True)["blocks"]):
+        if block.get("type")!=0:
             continue
-        box=_safe_rect(bbox,max(1,round(page.rect.width*zoom)),
-                       max(1,round(page.rect.height*zoom)),zoom)
-        if box is None:
+        for li,line in enumerate(block.get("lines",[])):
+            for span in line.get("spans",[]):
+                style={"font":span.get("font","Arial"),
+                       "size":span.get("size",10),
+                       "color":span.get("color",0)}
+                for ch in span.get("chars",[]):
+                    char=ch.get("c","")
+                    if not char:
+                        continue
+                    box=ch.get("bbox")
+                    if box is None:
+                        continue
+                    raw.append({"line":(bi,li),"char":char,
+                                "bbox":box,"style":style,
+                                "rotation":_line_rotation(line)})
+    return raw
+
+
+def _cell_content(characters,zoom,width,height):
+    """Return printable text and conservative style from actual PDF characters."""
+    if not characters:
+        return "",None,None,False
+    by_line=defaultdict(list)
+    for ch in characters:
+        by_line[ch["line"]].append(ch)
+    rows=sorted(by_line.values(),key=lambda group:(
+        min(t["bbox"][1] for t in group),
+        min(t["bbox"][0] for t in group)))
+    text="\n".join("".join(t["char"] for t in row).strip()
+                   for row in rows).strip()
+    if not text:
+        return "",None,None,False
+    weighted=Counter((ch["style"]["font"],round(float(ch["style"]["size"]),2),
+                      ch["style"]["color"]) for ch in characters
+                     if not ch["char"].isspace())
+    font,size,color=weighted.most_common(1)[0][0]
+    style=Style(font=_font_name(font),font_size=max(3.,min(256.,size)),
+                color=_pdf_color(color),fill="#FFFFFF",border_pt=0)
+    xs=[float(ch["bbox"][0]) for ch in characters]
+    ys=[float(ch["bbox"][1]) for ch in characters]
+    xe=[float(ch["bbox"][2]) for ch in characters]
+    ye=[float(ch["bbox"][3]) for ch in characters]
+    bbox=_safe_rect((min(xs),min(ys),max(xe),max(ye)),width,height,zoom)
+    caution=len(weighted)>2 or any("\ufffd" in ch["char"] for ch in characters)
+    return text,style,bbox,caution
+
+
+def _table_from_grid(grid,original_fragments,characters,source,zoom):
+    """Assign every *character* to its real vector cell, splitting PDF lines
+    which cross column borders (frequent in engineering specifications).
+    """
+    x0,y0,x1,y1=grid.bbox
+    xs,ys=grid.xedges,grid.yedges
+    nr,nc=len(ys)-1,len(xs)-1
+    owner={}
+    for index,cell in enumerate(grid.cells):
+        for r in range(cell.row,cell.row+cell.rowspan):
+            for c in range(cell.col,cell.col+cell.colspan):
+                owner[(r,c)]=index
+    if len(owner)!=nr*nc:
+        return None
+    groups=defaultdict(list)
+    text_count=0
+    for char in characters:
+        a,b,c,d=char["bbox"]
+        cx=(float(a)+float(c))/2
+        cy=(float(b)+float(d))/2
+        if not (x0<=cx<x1 and y0<=cy<y1):
             continue
-        if any(_rect_overlap(bbox,other_bbox)>.25*bbox.get_area()
-               for other_bbox in [fitz.Rect(t["pdf_bbox"]) for t in found]):
+        col=bisect_right(xs,cx)-1
+        row=bisect_right(ys,cy)-1
+        cell=owner.get((row,col))
+        if cell is None:
             continue
-        cells=[]
-        table_ids=[]
-        seen=set()
-        ambiguous=False
-        for cellrect,r,c,rs,cs in possible:
-            owned=[frag for frag in table_fragments
-                   if frag.id not in seen and
-                   _rect_overlap(cellrect,_fragment_pdf_bbox(frag,zoom))>
-                   .48*frag.bbox.w*frag.bbox.h/(zoom*zoom)]
-            for frag in owned:
-                seen.add(frag.id)
-            owned.sort(key=lambda f:(f.bbox.y,f.bbox.x))
-            ids=[f.id for f in owned]
-            table_ids.extend(ids)
-            cells.append(Cell(row=r,col=c,rowspan=rs,colspan=cs,
-                              text="\n".join(f.text for f in owned),
-                              ocr_ids=ids,
-                              style=Style(fill="#FFFFFF",font="Arial",font_size=9,
-                                          border_pt=0)))
-        # Fragment centers lying between cells need manual review, not duplication.
-        if any(f.id not in seen for f in table_fragments):
-            rejected.append(f"Таблица #{index}: текст на границе ячейки, оставлен как обычный блок")
+        groups[cell].append(char)
+        if char["char"].strip():
+            text_count+=1
+    if text_count<3:
+        return None
+    cells=[]
+    extra=[]
+    caution=False
+    for index,cell in enumerate(grid.cells):
+        content,style,fragment_box,bad=_cell_content(
+            groups[index],zoom,source.width,source.height)
+        caution|=bad
+        ids=[]
+        if content and fragment_box:
+            fid=uid("pdf_cell")
+            extra.append(Fragment(id=fid,text=content,
+                bbox=fragment_box,polygon=_polygon(fragment_box),
+                confidence=1,origin="region"))
+            ids=[fid]
+        cells.append(Cell(row=cell.row,col=cell.col,
+            rowspan=cell.rowspan,colspan=cell.colspan,
+            text=content,ocr_ids=ids,
+            style=style or Style(border_pt=0)))
+    original_ids=set()
+    for frag in original_fragments:
+        rect=_fragment_pdf_bbox(frag,zoom)
+        area=rect.get_area()
+        if (area and
+                _rect_overlap(_pdf_lib().Rect(grid.bbox),rect)>=.48*area):
+            original_ids.add(frag.id)
+    if not original_ids:
+        return None
+    box=_safe_rect(grid.bbox,source.width,source.height,zoom)
+    if box is None:
+        return None
+    xpixel=[x*zoom for x in xs]
+    ypixel=[y*zoom for y in ys]
+    box=Box(x=xpixel[0],y=ypixel[0],
+            w=xpixel[-1]-xpixel[0],h=ypixel[-1]-ypixel[0])
+    try:
+        table=Table(
+            id=uid("pdf_table"),bbox=box,rows=nr,columns=nc,
+            row_heights=[b-a for a,b in zip(ypixel,ypixel[1:])],
+            col_widths=[b-a for a,b in zip(xpixel,xpixel[1:])],
+            cells=cells,ocr_ids=[x.id for x in extra],
+            style=Style(font=next((c.style.font for c in cells if c.text),"Arial"),
+                        border_pt=0),
+            needs_review=caution,
+            review_notes=(["Смешанные PDF-шрифты/нечитаемые символы в ячейках"]
+                          if caution else []))
+    except ValueError:
+        return None
+    return table,original_ids,extra
+
+
+def _native_tables(page, original_fragments, source, zoom):
+    """Prioritize actual CAD strokes over generic table heuristics."""
+    vector=discover_vector_grids(page)
+    fallback=_fallback_grids(page)
+    chars=_raw_pdf_characters(page)
+    assigned=set()
+    extra=[]
+    tables=[]
+    warnings=[]
+    for grid in [*vector,*fallback]:
+        bbox=_pdf_lib().Rect(grid.bbox)
+        if any(_rect_overlap(bbox,_pdf_lib().Rect(t.bbox.x/zoom,
+                t.bbox.y/zoom,t.bbox.right/zoom,t.bbox.bottom/zoom)) >
+                .18*bbox.get_area() for t in tables):
             continue
-        if not table_ids:
+        proposal=_table_from_grid(grid,original_fragments,chars,source,zoom)
+        if proposal is None:
             continue
-        pixel_x=[max(0,min(page.rect.width*zoom,v*zoom)) for v in xedges]
-        pixel_y=[max(0,min(page.rect.height*zoom,v*zoom)) for v in yedges]
-        col_widths=[b-a for a,b in zip(pixel_x,pixel_x[1:])]
-        row_heights=[b-a for a,b in zip(pixel_y,pixel_y[1:])]
-        # Match the model geometry exactly to the sum of its grid sizes.
-        box=Box(x=pixel_x[0],y=pixel_y[0],w=sum(col_widths),h=sum(row_heights))
-        try:
-            native=Table(
-                id=uid("pdf_table"),bbox=box,rows=rows,columns=cols,
-                row_heights=row_heights,col_widths=col_widths,cells=cells,
-                ocr_ids=table_ids,style=Style(border_pt=0),
-                confidence=1.0,needs_review=ambiguous,
-                review_notes=(["Часть PDF-текста на границах ячеек: проверьте вручную"]
-                              if ambiguous else []),
-            )
-        except ValueError as exc:
-            rejected.append(f"Таблица #{index}: структура невалидна ({type(exc).__name__})")
+        table,ids,fragments=proposal
+        if ids & assigned:
+            warnings.append("Перекрывающиеся таблицы PDF: оставлена первая сетка")
             continue
-        found.append({"table":native,"pdf_bbox":tuple(bbox)})
-        assigned.update(table_ids)
-    return [item["table"] for item in found],assigned,rejected
+        tables.append(table)
+        assigned|=ids
+        extra.extend(fragments)
+    return tables,assigned,extra,warnings,{"vector_candidates":len(vector),
+            "fallback_candidates":len(fallback),"reconstructed":len(tables)}
 
 
 def _styles_for_group(lines,samples):
@@ -396,8 +512,11 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
                 "В PDF нет извлекаемого текста. Вероятно, это скан/контуры: "
                 "используйте отдельный OCR-режим.")
         progress("PDF: восстановление таблиц по векторным линиям")
-        tables,table_ids,table_warnings=_native_tables(page,fragments,zoom)
+        tables,table_ids,cell_fragments,table_warnings,table_diagnostics=(
+            _native_tables(page,fragments,source,zoom))
         texts=_pdf_text_objects(fragments,groups,table_ids,samples)
+        extracted_lines=len(fragments)
+        fragments=[f for f in fragments if f.id not in table_ids]+cell_fragments
         progress("PDF: создание фона без исходного текста")
         clean_png=_clean_background(raw,page_number,zoom)
         source.raster_b64=base64.b64encode(clean_png).decode("ascii")
@@ -405,7 +524,9 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
         result.raw["native_pdf"]={
             "page":page_number,"pages":len(doc),"zoom":zoom,
             "page_size_pt":[page.rect.width,page.rect.height],
-            "extracted_lines":len(fragments),
+            "extracted_lines":extracted_lines,
+            "cell_fragments":len(cell_fragments),
+            "table_detection":table_diagnostics,
             "grouped_text_blocks":len(texts),
             "native_tables":len(tables),
             "vector_paths":len(page.get_drawings()),
