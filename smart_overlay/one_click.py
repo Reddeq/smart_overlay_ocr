@@ -178,8 +178,9 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         from .native_pdf import native_pdf_project, PDF_ZOOM
         progress("PDF: чтение исходного текста и векторной структуры")
         source_project = native_pdf_project(source,pdf_page,zoom=PDF_ZOOM,
+                                            detect_tables=settings.native_pdf_detect_tables,
+                                            ignore_numbers=settings.native_pdf_ignore_numbers,
                                             progress=progress)
-        source_project.raw["native_pdf"]["overlay_mode"] = settings.native_pdf_overlay_mode
         # 2 source pixels per PDF point => 144px / physical inch.
         settings.inches_per_pixel = 1 / (72 * PDF_ZOOM)
     else:
@@ -202,6 +203,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         project = source_project
         meta = project.raw.get("native_pdf", {})
         warnings.extend(str(issue) for issue in meta.get("unresolved", []))
+        warnings.extend(meta.get("font_warnings", []))
     elif engine == "cloud_full":
         from .cloud_ocr import recognize_cloud
         if not consent:
@@ -299,7 +301,7 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         skipped = suppress_standalone_codes(project)
         if skipped:
             project.messages.append(f"Оставлено на оригинальном изображении обозначений: {skipped}")
-    # PDF text removed from the raster must remain editable, including codes.
+    # Native PDF text remains editable, including standalone codes.
     project.settings = settings.model_dump()
     validate_project(project)
     progress("Создание редактируемого PowerPoint")

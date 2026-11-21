@@ -1,10 +1,10 @@
 """Born-digital (vector) PDF -> editable text/table overlays, without OCR.
 
 Use PDF text spans and ruled cell geometry, not inferred visual OCR.
-The displayed PDF background preserves the ENTIRE original page, including
-authentic PDF glyphs, vector paths and images. OCR-style editable objects
-can cover only original glyph footprints when visible. Source-exact mode
-keeps the full raster visually untouched with transparent editable objects.
+The background preserves the ENTIRE original page, including authentic PDF
+glyphs, paths and images. Visible editable frames and cells cover the source
+using their OWN fills, without separate mask shapes. Legacy source-exact
+and glyph-mask projects retain their saved export behavior.
 The original input is never modified.
 Currently one PDF page per PowerPoint slide/file.
 """
@@ -15,10 +15,17 @@ from collections import Counter, defaultdict
 from bisect import bisect_right
 import hashlib
 import math
+import os
 from pathlib import Path
+import shlex
 from statistics import median
+import sys
 
-from .models import Box, Cell, Fragment, Project, Source, Style, Table, Text, uid
+from .models import (Box, Cell, Fragment, NativeLayout, NativeLine, NativeRun,
+                     Project, Source, Style, Table, Text, uid)
+from .native_dedup import deduplicate_text
+from .native_numbers import is_numeric_label
+from .native_paragraphs import LIST_START, normalize_layout
 from .structure import validate_project
 from .vector_grid import GridCell, VectorGrid, discover_vector_grids
 
@@ -36,8 +43,15 @@ def _pdf_lib():
         import pymupdf
         return pymupdf
     except ImportError as exc:
+        requirement="PyMuPDF>=1.26.4,<2"
+        if os.name=="nt":
+            executable=sys.executable.replace("'","''")
+            command=f"& '{executable}' -m pip install '{requirement}'"
+        else:
+            command=shlex.join([sys.executable,"-m","pip","install",requirement])
         raise NativePDFError(
-            "Для цифровых PDF необходим PyMuPDF: python -m pip install 'PyMuPDF>=1.26,<2'"
+            f"Не удалось загрузить PyMuPDF в Python приложения: {sys.executable}\n"
+            f"Причина: {exc}\nУстановите зависимость в это окружение:\n{command}"
         ) from exc
 
 
@@ -156,6 +170,17 @@ def _font_name(value):
     return name or "Arial"
 
 
+def _font_family(value):
+    name=_font_name(value)
+    standard={"Helvetica":"Arial","Helvetica-Bold":"Arial",
+              "Helvetica-Oblique":"Arial","Helvetica-BoldOblique":"Arial",
+              "Times-Roman":"Times New Roman","Times-Bold":"Times New Roman",
+              "Times-Italic":"Times New Roman","Times-BoldItalic":"Times New Roman",
+              "Courier":"Courier New","Courier-Bold":"Courier New",
+              "Courier-Oblique":"Courier New","Courier-BoldOblique":"Courier New"}
+    return standard.get(name,name) or "Arial"
+
+
 def _line_rotation(line):
     vector=line.get("dir",(1,0))
     if len(vector)!=2:
@@ -164,13 +189,14 @@ def _line_rotation(line):
     return round(angle,2)
 
 
-def _read_lines(page, source, zoom):
+def _read_lines(page, source, zoom, text_data=None):
     """Preserve whole PDF text lines as fragments, and block grouping for CAT."""
     fragments=[]
     groups=defaultdict(list)
     samples={}
     skipped=[]
-    for block_index,block in enumerate(page.get_text("dict",sort=True).get("blocks",[])):
+    data=page.get_text("dict",sort=True) if text_data is None else text_data
+    for block_index,block in enumerate(data.get("blocks",[])):
         if block.get("type")!=0:
             continue
         for line_index,line in enumerate(block.get("lines",[])):
@@ -184,11 +210,17 @@ def _read_lines(page, source, zoom):
                                 "reason":"invalid_bounds"})
                 continue
             fid=uid("pdf_text")
-            frag=Fragment(id=fid,text=text,bbox=bbox,polygon=_polygon(bbox),
+            quad=_pdf_lib().recover_line_quad(line)
+            polygon=[(max(0.,min(source.width,p.x*zoom)),
+                      max(0.,min(source.height,p.y*zoom)))
+                     for p in (quad.ul,quad.ur,quad.lr,quad.ll)]
+            frag=Fragment(id=fid,text=text,bbox=bbox,polygon=polygon,
                           confidence=1.0,origin="region",rotation=_line_rotation(line))
             fragments.append(frag)
             groups[block_index].append(fid)
-            samples[fid]=spans[0] if spans else {}
+            samples[fid]={**(spans[0] if spans else {}),"_spans":spans,
+                          "_block":block_index,
+                          "_dedup_ambiguous":line.get("_dedup_ambiguous",False)}
     return fragments,groups,samples,skipped
 
 
@@ -274,17 +306,19 @@ def _cluster_pdf_edges(values):
     return _cluster(values,.7)
 
 
-def _raw_pdf_characters(page):
+def _raw_pdf_characters(page, text_data=None):
     """Direct PDF glyphs, retaining the font and text order of each line."""
     raw=[]
-    for bi,block in enumerate(page.get_text("rawdict",sort=True)["blocks"]):
+    data=page.get_text("rawdict",sort=True) if text_data is None else text_data
+    for bi,block in enumerate(data["blocks"]):
         if block.get("type")!=0:
             continue
         for li,line in enumerate(block.get("lines",[])):
             for span in line.get("spans",[]):
                 style={"font":span.get("font","Arial"),
                        "size":span.get("size",10),
-                       "color":span.get("color",0)}
+                       "color":span.get("color",0),
+                       "flags":span.get("flags",0)}
                 for ch in span.get("chars",[]):
                     char=ch.get("c","")
                     if not char:
@@ -294,20 +328,101 @@ def _raw_pdf_characters(page):
                         continue
                     raw.append({"line":(bi,li),"char":char,
                                 "bbox":box,"style":style,
-                                "rotation":_line_rotation(line)})
+                                "origin":ch.get("origin",(box[0],box[3])),
+                                "rotation":_line_rotation(line),
+                                "dedup_ambiguous":line.get("_dedup_ambiguous",False)})
     return raw
+
+
+def _cell_rows(characters):
+    by_line=defaultdict(list)
+    for ch in characters:
+        by_line[ch["line"]].append(ch)
+    rotation=characters[0]["rotation"] if characters else 0
+    cs,sn=math.cos(math.radians(rotation)),math.sin(math.radians(rotation))
+    rows=sorted(by_line.values(),key=lambda group:(
+        min(-t["origin"][0]*sn+t["origin"][1]*cs for t in group),
+        min(t["origin"][0]*cs+t["origin"][1]*sn for t in group)))
+    for row in rows:
+        while row and row[0]["char"].isspace():
+            row.pop(0)
+        while row and row[-1]["char"].isspace():
+            row.pop()
+    return [row for row in rows if row]
+
+
+def _cell_layout(characters,bbox,style):
+    if bbox is None:
+        return None
+    rows=_cell_rows(characters)
+    lines=[]
+    rotation=characters[0]["rotation"]
+    cs,sn=math.cos(math.radians(rotation)),math.sin(math.radians(rotation))
+    baselines=[-row[0]["origin"][0]*sn+row[0]["origin"][1]*cs for row in rows]
+    for i,row in enumerate(rows):
+        runs=[]
+        previous=None
+        run_start=0.
+        for ch in row:
+            s=ch["style"]
+            origin=ch["origin"][0]*cs+ch["origin"][1]*sn
+            if s==previous:
+                runs[-1].text+=ch["char"]
+            else:
+                runs.append(NativeRun(text=ch["char"],font=_font_name(s["font"]),
+                    font_size=max(3.,min(256.,float(s["size"]))),color=_pdf_color(s["color"]),
+                    bold=bool(int(s.get("flags",0)) & 16),
+                    italic=bool(int(s.get("flags",0)) & 2)))
+                previous=s
+                run_start=origin
+            x0,y0,x1,y1=ch["bbox"]
+            end=max(x*cs+y*sn for x,y in ((x0,y0),(x1,y0),(x1,y1),(x0,y1)))
+            runs[-1].advance=max(0.,end-run_start)
+        spacing=baselines[i+1]-baselines[i] if i+1<len(rows) else None
+        lines.append(NativeLine(runs=runs,line_spacing=spacing if spacing and spacing>0 else None))
+    return NativeLayout(frame=bbox,rotation=rotation,lines=lines,
+                        reference_style=style.model_copy()) if lines else None
+
+
+def _cell_anchors(layout,style,bounds,zoom):
+    """Alignment is not padding: large merged-cell insets can grow PPT rows."""
+    cs,sn=math.cos(math.radians(layout.rotation)),math.sin(math.radians(layout.rotation))
+    def local(rect):
+        x0,y0,x1,y1=rect
+        points=[(x*cs+y*sn,-x*sn+y*cs)
+                for x,y in ((x0,y0),(x1,y0),(x1,y1),(x0,y1))]
+        return (min(p[0] for p in points),min(p[1] for p in points),
+                max(p[0] for p in points),max(p[1] for p in points))
+    a,b,c,d=local(bounds)
+    frame=layout.frame
+    x0,y0,x1,y1=local((frame.x/zoom,frame.y/zoom,frame.right/zoom,frame.bottom/zoom))
+    left,right=max(0.,x0-a),max(0.,c-x1)
+    top,bottom=max(0.,y0-b),max(0.,d-y1)
+    if abs(left-right)<=max(.75,style.font_size*.2):
+        style.align="center"
+        left=right=0.
+    elif right<left and right<style.font_size*.75:
+        style.align="right"
+        left=0.
+    else:
+        right=0.
+    if abs(top-bottom)<=max(1.5,style.font_size*.35):
+        layout.valign="middle"
+        top=bottom=0.
+    elif bottom<top and bottom<style.font_size*.75:
+        layout.valign="bottom"
+        top=0.
+    else:
+        bottom=0.
+    layout.margin=(top,right,bottom,left)
+    layout.reference_style=style.model_copy()
 
 
 def _cell_content(characters,zoom,width,height):
     """Return printable text and conservative style from actual PDF characters."""
     if not characters:
         return "",None,None,False
-    by_line=defaultdict(list)
-    for ch in characters:
-        by_line[ch["line"]].append(ch)
-    rows=sorted(by_line.values(),key=lambda group:(
-        min(t["bbox"][1] for t in group),
-        min(t["bbox"][0] for t in group)))
+    rows=_cell_rows(characters)
     text="\n".join("".join(t["char"] for t in row).strip()
                    for row in rows).strip()
     if not text:
@@ -318,6 +433,8 @@ def _cell_content(characters,zoom,width,height):
     font,size,color=weighted.most_common(1)[0][0]
     style=Style(font=_font_name(font),font_size=max(3.,min(256.,size)),
                 color=_pdf_color(color),fill="#FFFFFF",border_pt=0)
+    style.bold=bool(int(rows[0][0]["style"].get("flags",0)) & 16)
+    style.italic=bool(int(rows[0][0]["style"].get("flags",0)) & 2)
     xs=[float(ch["bbox"][0]) for ch in characters]
     ys=[float(ch["bbox"][1]) for ch in characters]
     xe=[float(ch["bbox"][2]) for ch in characters]
@@ -330,7 +447,7 @@ def _cell_content(characters,zoom,width,height):
     return text,style,bbox,caution
 
 
-def _table_from_grid(grid,original_fragments,characters,source,zoom):
+def _table_from_grid(grid,original_fragments,characters,source,zoom,border_pt=.5):
     """Assign every *character* to its real vector cell, splitting PDF lines
     which cross column borders (frequent in engineering specifications).
     """
@@ -368,6 +485,14 @@ def _table_from_grid(grid,original_fragments,characters,source,zoom):
     for index,cell in enumerate(grid.cells):
         content,style,fragment_box,bad=_cell_content(
             groups[index],zoom,source.width,source.height)
+        layout=_cell_layout(groups[index],fragment_box,style)
+        if layout is not None:
+            rotations={ch["rotation"] for ch in groups[index]}
+            if len(rotations)>1 or layout.rotation not in (0,90,-90):
+                return None  # Native table cells cannot reproduce arbitrary rotations.
+            _cell_anchors(layout,style,cell.bbox,zoom)
+        if style is not None:
+            style.border_pt=border_pt
         caution|=bad
         ids=[]
         if content and fragment_box:
@@ -379,7 +504,7 @@ def _table_from_grid(grid,original_fragments,characters,source,zoom):
         cells.append(Cell(row=cell.row,col=cell.col,
             rowspan=cell.rowspan,colspan=cell.colspan,
             text=content,ocr_ids=ids,
-            style=style or Style(border_pt=0)))
+            style=style or Style(border_pt=border_pt),native_layout=layout))
     original_ids=set()
     for frag in original_fragments:
         rect=_fragment_pdf_bbox(frag,zoom)
@@ -405,6 +530,7 @@ def _table_from_grid(grid,original_fragments,characters,source,zoom):
     box=Box(x=xpixel[0],y=ypixel[0],
             w=xpixel[-1]-xpixel[0],h=ypixel[-1]-ypixel[0])
     try:
+        ambiguous=any(ch.get("dedup_ambiguous") for group in groups.values() for ch in group)
         table=Table(
             id=uid("pdf_table"),bbox=box,rows=nr,columns=nc,
             row_heights=[b-a for a,b in zip(ypixel,ypixel[1:])],
@@ -412,81 +538,241 @@ def _table_from_grid(grid,original_fragments,characters,source,zoom):
             cells=cells,ocr_ids=[x.id for x in extra],
             style=Style(font=next((c.style.font for c in cells if c.text),"Arial"),
                         border_pt=0),
-            needs_review=caution,
+            needs_review=caution or ambiguous,
             review_notes=(["Смешанные PDF-шрифты/нечитаемые символы в ячейках"]
-                          if caution else []))
+                          if caution else [])+(
+                         ["PDF: неоднозначное наложение текста ячеек — обе версии сохранены"]
+                          if ambiguous else []))
     except ValueError:
         return None
     return table,original_ids,extra
 
 
-def _native_tables(page, original_fragments, source, zoom):
+def _raster_grids(page,source,fragments,existing,zoom):
+    """Image-grid fallback: locate cells visually, never recognize their text."""
+    if len(fragments)<2:
+        return []
+    regions=set()
+    for info in page.get_image_info():
+        box=_safe_rect(info["bbox"],source.width,source.height,zoom)
+        if box is not None and box.w>=50 and box.h>=35:
+            regions.add((int(box.x),int(box.y),math.ceil(box.right),math.ceil(box.bottom)))
+    if not regions:
+        return []  # CAD/vector pages do not pay for image analysis or OCR models.
+    from .geometry import intersection
+    from .input import source_image
+    from .tables import geometric_tables
+    from PIL import Image
+    image=None
+    grids=[]
+    for x0,y0,x1,y1 in sorted(regions):
+        region=Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
+        members=[f for f in fragments if intersection(f.bbox,region)>.5*f.bbox.w*f.bbox.h]
+        if len(members)<2:
+            continue
+        if image is None:
+            image=source_image(Project(source=source))
+        crop=image.crop((x0,y0,x1,y1))
+        factor=min(1.,2800/max(crop.size))
+        if factor<1:
+            crop=crop.resize((max(1,round(crop.width*factor)),max(1,round(crop.height*factor))),
+                             Image.Resampling.LANCZOS)
+        sx,sy=crop.width/region.w,crop.height/region.h
+        def local_box(box):
+            return Box(x=(box.x-x0)*sx,y=(box.y-y0)*sy,
+                       w=box.w*sx,h=box.h*sy)
+        local_fragments=[f.model_copy(update={"bbox":local_box(f.bbox),
+            "polygon":[((x-x0)*sx,(y-y0)*sy) for x,y in f.polygon]}) for f in members]
+        local_existing=[t.model_copy(update={"bbox":local_box(t.bbox)}) for t in existing]
+        for table in geometric_tables(crop,local_fragments,local_existing):
+            xs=[table.bbox.x]
+            ys=[table.bbox.y]
+            for width in table.col_widths:
+                xs.append(xs[-1]+width)
+            for height in table.row_heights:
+                ys.append(ys[-1]+height)
+            xs=[(x/sx+x0)/zoom for x in xs]
+            ys=[(y/sy+y0)/zoom for y in ys]
+            bounds=(xs[0],ys[0],xs[-1],ys[-1])
+            if (xs[-1]-xs[0])*(ys[-1]-ys[0])>.24*page.rect.get_area():
+                continue
+            cells=tuple(GridCell(c.row,c.col,c.rowspan,c.colspan,
+                (xs[c.col],ys[c.row],xs[c.col+c.colspan],ys[c.row+c.rowspan]))
+                for c in table.cells)
+            grids.append(VectorGrid(bounds,tuple(xs),tuple(ys),cells,"raster_grid_native_text"))
+    return grids
+
+
+def _native_tables(page, original_fragments, source, zoom, drawings=None, text_data=None):
     """Prioritize actual CAD strokes over generic table heuristics."""
-    vector=discover_vector_grids(page)
-    fallback=_fallback_grids(page)
-    chars=_raw_pdf_characters(page)
+    drawings=page.get_drawings() if drawings is None else drawings
+    vector=discover_vector_grids(page,drawings=drawings)
+    fallback=[]
+    raster=[]
+    chars=_raw_pdf_characters(page,text_data)
     assigned=set()
     extra=[]
     tables=[]
     warnings=[]
-    for grid in [*vector,*fallback]:
+    stroke_styles=[(tuple(path["rect"]),float(path["width"])) for path in drawings
+                   if path.get("type") in ("s","fs") and path.get("width",0)>0
+                   and any(item[0]=="l" and abs(item[1]-item[2])>5
+                           for item in path.get("items",[]))]
+    def candidates():
+        yield from vector
+        remaining=[f for f in original_fragments if f.id not in assigned]
+        raster.extend(_raster_grids(page,source,remaining,tables,zoom))
+        yield from raster
+        # Generic full-page detection is expensive and can swallow title blocks
+        # into the sheet frame. Use it only if no vector proposal was accepted.
+        if not tables:
+            fallback.extend(_fallback_grids(page))
+            yield from fallback
+    for grid in candidates():
         bbox=_pdf_lib().Rect(grid.bbox)
         if any(_rect_overlap(bbox,_pdf_lib().Rect(t.bbox.x/zoom,
                 t.bbox.y/zoom,t.bbox.right/zoom,t.bbox.bottom/zoom)) >
                 .18*bbox.get_area() for t in tables):
             continue
-        proposal=_table_from_grid(grid,original_fragments,chars,source,zoom)
+        widths=[width for (a,b,c,d),width in stroke_styles
+                if a-.1<bbox.x1 and c+.1>bbox.x0 and b-.1<bbox.y1 and d+.1>bbox.y0]
+        border_pt=max(.1,min(20.,median(widths))) if widths else .5
+        proposal=_table_from_grid(grid,original_fragments,chars,source,zoom,border_pt)
         if proposal is None:
+            if len(warnings)<10:
+                warnings.append("Таблица PDF не восстановлена безопасно: текст сохранён надписями")
             continue
         table,ids,fragments=proposal
         if ids & assigned:
             warnings.append("Перекрывающиеся таблицы PDF: оставлена первая сетка")
             continue
+        if grid.discovery=="raster_grid_native_text":
+            table.confidence=.7
+            table.needs_review=True
+            table.review_notes.append("Сетка найдена по изображению; текст и оформление взяты из PDF")
         tables.append(table)
         assigned|=ids
         extra.extend(fragments)
     return tables,assigned,extra,warnings,{"vector_candidates":len(vector),
-            "fallback_candidates":len(fallback),"reconstructed":len(tables)}
+            "fallback_candidates":len(fallback),"raster_candidates":len(raster),
+            "reconstructed":len(tables)}
 
 
 def _styles_for_group(lines,samples):
     sample=samples.get(lines[0].id,{})
-    return Style(
+    style=Style(
         font=_font_name(sample.get("font","")),
         font_size=max(3.,min(256.,float(sample.get("size",10) or 10))),
         color=_pdf_color(sample.get("color",0)),
         fill="#FFFFFF",
         border_pt=0,
+        bold=bool(int(sample.get("flags",0)) & 16),
+        italic=bool(int(sample.get("flags",0)) & 2),
     )
+    if len(lines)>1:
+        boxes=[_local_bounds(f,lines[0].rotation) for f in lines]
+        positions={"left":[b[0] for b in boxes],
+                   "center":[(b[0]+b[2])/2 for b in boxes],
+                   "right":[b[2] for b in boxes]}
+        spread={name:max(values)-min(values) for name,values in positions.items()}
+        if spread["left"]>2:
+            style.align="center" if spread["center"]<=spread["right"] else "right"
+    return style
 
 
-def _separate_logical_blocks(lines, samples):
+def _local_bounds(frag, rotation):
+    radians=math.radians(rotation)
+    cs,sn=math.cos(radians),math.sin(radians)
+    us=[x*cs+y*sn for x,y in frag.polygon]
+    vs=[-x*sn+y*cs for x,y in frag.polygon]
+    return min(us),min(vs),max(us),max(vs)
+
+
+def _native_layout(members,samples,zoom):
+    rotation=members[0].rotation
+    boxes=[_local_bounds(f,rotation) for f in members]
+    left,top=min(b[0] for b in boxes),min(b[1] for b in boxes)
+    right,bottom=max(b[2] for b in boxes),max(b[3] for b in boxes)
+    cs,sn=math.cos(math.radians(rotation)),math.sin(math.radians(rotation))
+    u,v=(left+right)/2,(top+bottom)/2
+    w,h=right-left,bottom-top
+    frame=Box(x=u*cs-v*sn-w/2,y=u*sn+v*cs-h/2,w=w,h=h)
+    baselines=[]
+    for frag in members:
+        origin=samples[frag.id]["_spans"][0]["origin"]
+        baselines.append((-origin[0]*sn+origin[1]*cs)*zoom)
+    lines=[]
+    for i,frag in enumerate(members):
+        runs=[]
+        for span in samples[frag.id]["_spans"]:
+            quad=_pdf_lib().recover_quad((cs,sn),span)
+            runs.append(NativeRun(text=span.get("text",""),
+                font=_font_name(span.get("font")),
+                font_size=max(3.,min(256.,float(span.get("size",10)))),
+                color=_pdf_color(span.get("color",0)),
+                bold=bool(int(span.get("flags",0)) & 16),
+                italic=bool(int(span.get("flags",0)) & 2),
+                advance=math.hypot(quad.ur.x-quad.ul.x,quad.ur.y-quad.ul.y)))
+        distance=(baselines[i+1]-baselines[i])/zoom if i+1<len(members) else None
+        lines.append(NativeLine(runs=runs,line_spacing=distance if distance and distance>0 else None,
+                                indent=max(0.,(boxes[i][0]-left)/zoom)))
+    return NativeLayout(frame=frame,rotation=rotation,lines=lines,
+                        reference_style=_styles_for_group(members,samples))
+
+
+def _separate_logical_blocks(lines, samples, separators=(), zoom=PDF_ZOOM):
     """One PDF block may include dozens of adjacent drawing columns.
 
-    A logical CAT paragraph is vertically consecutive, left-aligned,
-    single-font and single-direction. Same-baseline column headers are NOT
+    A logical CAT paragraph is consecutive and aligned in local coordinates,
+    with a shared font family/direction. Same-baseline column headers are NOT
     concatenated with newlines merely because a PDF producer grouped them.
     """
     buckets=[]
-    for frag in sorted(lines,key=lambda f:(f.bbox.y,f.bbox.x)):
+    for frag in sorted(lines,key=lambda f:(round(f.rotation),
+                       _local_bounds(f,f.rotation)[1],_local_bounds(f,f.rotation)[0])):
         sample=samples.get(frag.id,{})
         best=None
         best_gap=None
         for bucket in buckets:
             last=bucket[-1]
             previous=samples.get(last.id,{})
-            if (_font_name(sample.get("font"))!=_font_name(previous.get("font"))
+            if (_font_family(sample.get("font"))!=_font_family(previous.get("font"))
                     or abs(frag.rotation-last.rotation)>1):
                 continue
-            dx=abs(frag.bbox.x-last.bbox.x)
-            if dx>max(3.,min(frag.bbox.h,last.bbox.h)*.65):
-                continue
-            vertical_gap=frag.bbox.y-last.bbox.bottom
+            a,b=_local_bounds(frag,last.rotation),_local_bounds(last,last.rotation)
+            height=min(a[3]-a[1],b[3]-b[1])
+            dx=min(abs(a[0]-b[0]),abs(a[2]-b[2]),abs((a[0]+a[2]-b[0]-b[2])/2))
+            if dx>max(3.,height*.35):
+                first=_local_bounds(bucket[0],last.rotation)
+                overlap=min(a[2],b[2])-max(a[0],b[0])
+                hanging=(LIST_START.match(bucket[0].text)
+                         and first[0]-.5*zoom<=a[0]<=first[0]+height*1.5
+                         and overlap>.5*min(a[2]-a[0],b[2]-b[0]))
+                if not hanging:
+                    continue
+            vertical_gap=a[1]-b[3]
             # A real multiline label has consecutive baseline positions.
             # Equal-baseline fragments are probably neighboring table columns.
-            if vertical_gap<(-.20*min(frag.bbox.h,last.bbox.h)):
+            if vertical_gap<(-.20*height):
                 continue
-            if vertical_gap>max(5.,last.bbox.h*.45):
+            if vertical_gap>max(5.,height*.45):
+                continue
+            cs,sn=math.cos(math.radians(last.rotation)),math.sin(math.radians(last.rotation))
+            def local(point):
+                x,y=point
+                return (x*cs+y*sn)*zoom,(-x*sn+y*cs)*zoom
+            before=local(previous["_spans"][0]["origin"])[1]
+            after=local(sample["_spans"][0]["origin"])[1]
+            common_left,common_right=max(a[0],b[0]),min(a[2],b[2])
+            blocked=False
+            for start,stop in separators:
+                u0,v0=local(start); u1,v1=local(stop)
+                overlap=min(max(u0,u1),common_right)-max(min(u0,u1),common_left)
+                if (abs(v0-v1)<.4*zoom and before<v0<after
+                        and overlap>.6*max(1.,common_right-common_left)):
+                    blocked=True
+                    break
+            if blocked:
                 continue
             if best_gap is None or abs(vertical_gap)<best_gap:
                 best=bucket
@@ -498,35 +784,36 @@ def _separate_logical_blocks(lines, samples):
     return buckets
 
 
-def _pdf_text_objects(fragments, groups, table_ids, samples):
+def _pdf_text_objects(fragments, groups, table_ids, samples, zoom=PDF_ZOOM, separators=()):
     by_id={f.id:f for f in fragments}
     objects=[]
-    for _,ids in groups.items():
-        free=[by_id[i] for i in ids if i not in table_ids]
-        if not free:
-            continue
-        for members in _separate_logical_blocks(free,samples):
-            x0=min(f.bbox.x for f in members)
-            y0=min(f.bbox.y for f in members)
-            x1=max(f.bbox.right for f in members)
-            y1=max(f.bbox.bottom for f in members)
-            bbox=Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
-            bad_encoding=any(
-                "\ufffd" in f.text or "\x00" in f.text or
-                any("\uac00" <= ch <= "\ud7af" for ch in f.text)
-                for f in members)
-            uneven=any(abs(f.rotation-members[0].rotation)>1 for f in members)
-            objects.append(Text(
-                id=uid("pdf_block"),bbox=bbox,
-                text="\n".join(f.text for f in members),
-                ocr_ids=[f.id for f in members],
-                style=_styles_for_group(members,samples),
-                confidence=1.0,rotation=members[0].rotation,
-                needs_review=bad_encoding or uneven,
-                review_notes=(
-                    ["PDF: проверьте шрифт/кодировку или поворот текста"]
-                    if bad_encoding or uneven else []),
-            ))
+    # PDF producers can split one paragraph into several independent blocks.
+    free=[by_id[i] for ids in groups.values() for i in ids if i not in table_ids]
+    for members in _separate_logical_blocks(free,samples,separators,zoom):
+        x0=min(f.bbox.x for f in members)
+        y0=min(f.bbox.y for f in members)
+        x1=max(f.bbox.right for f in members)
+        y1=max(f.bbox.bottom for f in members)
+        bbox=Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
+        bad_encoding=any(
+            "\ufffd" in f.text or "\x00" in f.text or
+            any("\uac00" <= ch <= "\ud7af" for ch in f.text)
+            for f in members)
+        uneven=any(abs(f.rotation-members[0].rotation)>1 for f in members)
+        ambiguous=any(samples.get(f.id,{}).get("_dedup_ambiguous") for f in members)
+        objects.append(Text(
+            id=uid("pdf_block"),bbox=bbox,
+            text="\n".join(f.text for f in members),
+            ocr_ids=[f.id for f in members],
+            style=_styles_for_group(members,samples),
+            confidence=1.0,rotation=members[0].rotation,
+            native_layout=_native_layout(members,samples,zoom),
+            needs_review=bad_encoding or uneven or ambiguous,
+            review_notes=(["PDF: проверьте шрифт/кодировку или поворот текста"]
+                          if bad_encoding or uneven else [])+(
+                         ["PDF: неоднозначное наложение надписей — обе версии сохранены"]
+                          if ambiguous else []),
+        ))
     return objects
 
 
@@ -550,7 +837,8 @@ def _clean_background(raw,page_number,zoom):
         temporary.close()
 
 
-def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None):
+def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,detect_tables=True,
+                       ignore_numbers=False,progress=lambda _:None):
     """Single born-digital PDF page to validated editable text/table project."""
     raw,doc=_read_pdf(path)
     try:
@@ -559,51 +847,85 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
         # PNG dimensions use PyMuPDF's pixel rounding convention.
         original_png=_render_png(page,zoom)
         source=_make_source(raw,path,original_png,page,zoom)
-        fragments,groups,samples,skipped=_read_lines(page,source,zoom)
+        text_data,deduplication=deduplicate_text(page.get_text("rawdict",sort=True))
+        fragments,groups,samples,skipped=_read_lines(page,source,zoom,text_data)
         if not fragments:
             raise NativePDFError(
                 "В PDF нет извлекаемого текста. Вероятно, это скан/контуры: "
                 "используйте отдельный OCR-режим.")
-        progress("PDF: восстановление таблиц по векторным линиям")
-        tables,table_ids,cell_fragments,table_warnings,table_diagnostics=(
-            _native_tables(page,fragments,source,zoom))
-        texts=_pdf_text_objects(fragments,groups,table_ids,samples)
+        tables,table_ids,cell_fragments,table_warnings=[],set(),[],[]
+        table_diagnostics={"vector_candidates":0,"fallback_candidates":0,
+                           "raster_candidates":0,"reconstructed":0}
+        drawings=page.get_drawings()
+        if detect_tables:
+            progress("PDF: восстановление таблиц по векторным линиям")
+            tables,table_ids,cell_fragments,table_warnings,table_diagnostics=(
+                _native_tables(page,fragments,source,zoom,drawings=drawings,text_data=text_data))
+        # Ruled separators still delimit labels in text-only mode; this does
+        # not infer any table topology or run the table detectors.
+        separators=[(tuple(item[1]),tuple(item[2])) for path in drawings
+                    if path.get("type") in ("s","fs") for item in path.get("items",[])
+                    if item[0]=="l" and abs(item[1]-item[2])>10]
+        texts=_pdf_text_objects(fragments,groups,table_ids,samples,zoom,separators)
         extracted_lines=len(fragments)
+        for obj in [*texts, *(cell for table in tables for cell in table.cells)]:
+            if obj.native_layout is not None:
+                obj.text=normalize_layout(obj.native_layout)
+        ignored={}
+        if ignore_numbers:
+            kept=[]
+            for obj in texts:
+                if is_numeric_label(obj.text):
+                    ignored.update({fid:"numeric_standalone_label" for fid in obj.ocr_ids})
+                else:
+                    kept.append(obj)
+            texts=kept
         fragments=[f for f in fragments if f.id not in table_ids]+cell_fragments
-        # The page is the ORIGINAL, unmodified PDF raster. OCR-style
-        # overlaid editable labels/tables may mask only their own original
-        # glyph footprints during PPTX export. Do NOT redact the source.
+        # Export overlays use filled text frames/cells, never a redacted raster.
         progress("PDF: сохранение полной страницы с исходным текстом")
         source.raster_b64=base64.b64encode(original_png).decode("ascii")
-        result=Project(source=source,fragments=fragments,objects=[*tables,*texts])
-        detected_fonts=sorted({
-            _font_name(sample.get("font","")) for sample in samples.values()
-            if sample.get("font")})
-        if any(name not in ("Arial","Calibri","Times New Roman",
-                            "Helvetica","Courier") for name in detected_fonts):
-            result.messages.append(
+        result=Project(source=source,fragments=fragments,objects=[*tables,*texts],ignored=ignored)
+        detected_fonts=sorted({_font_name(span["font"]) for sample in samples.values()
+                               for span in sample["_spans"] if span.get("font")})
+        font_warnings=[]
+        if any(_font_family(name) not in ("Arial","Calibri","Times New Roman",
+                                         "Courier New") for name in detected_fonts):
+            font_warnings.append(
                 "PDF использует специальный шрифт: "+
                 ", ".join(detected_fonts[:10])+
                 ". Для совпадения в PowerPoint он должен быть установлен "
                 "на компьютере; шрифты из PDF не распространяются.")
+        result.messages.extend(font_warnings)
         result.raw["native_pdf"]={
             "page":page_number,"pages":len(doc),"zoom":zoom,
             "source_fonts":detected_fonts,
+            "font_warnings":font_warnings,
             "page_size_pt":[page.rect.width,page.rect.height],
             "extracted_lines":extracted_lines,
             "cell_fragments":len(cell_fragments),
             "table_detection":table_diagnostics,
             "grouped_text_blocks":len(texts),
             "native_tables":len(tables),
-            "vector_paths":len(page.get_drawings()),
+            "vector_paths":len(drawings),
             "text_redacted_background":False,
             "background_mode":"full_original",
-            "overlay_mode":"ocr_style",
+            "overlay_mode":"editable",
+            "detect_tables":detect_tables,
+            "ignore_numbers":ignore_numbers,
+            "deduplication":deduplication,
             "unresolved":skipped+table_warnings,
         }
         result.messages.append(
             f"Цифровой PDF: {len(texts)} текстовых блоков, "
             f"{len(tables)} редактируемых таблиц, без OCR")
+        if deduplication["removed_lines"]:
+            result.messages.append(
+                f"PDF: исключено наложенных копий строк: {deduplication['removed_lines']} "
+                f"({deduplication['removed_glyphs']} символов); исходная PNG не изменена")
+        if deduplication["ambiguous_lines"]:
+            result.messages.append(
+                f"PDF: неоднозначных наложенных строк: {deduplication['ambiguous_lines']}; "
+                "сохранены и помечены для проверки")
         if table_warnings:
             result.messages.extend(table_warnings)
         validate_project(result)

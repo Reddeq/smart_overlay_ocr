@@ -61,6 +61,43 @@ class Style(Model):
     align: Literal["left", "center", "right"] = "left"
     border_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$")
     border_pt: float = Field(default=0.5, ge=0, le=20)
+    bold: bool = False
+    italic: bool = False
+
+
+class NativeRun(Model):
+    text: str
+    font: str
+    font_size: float = Field(gt=0, le=256)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    bold: bool = False
+    italic: bool = False
+    advance: float | None = Field(default=None, ge=0)
+
+
+class NativeLine(Model):
+    runs: list[NativeRun]
+    line_spacing: float | None = Field(default=None, gt=0)
+    indent: float = Field(default=0, ge=0)
+
+
+class NativeParagraph(Model):
+    runs: list[NativeRun]
+
+
+class NativeLayout(Model):
+    """PDF typography: frame in raster pixels, paragraph distances in PDF points.
+
+    Runs are used only while their text still matches the editable plain text.
+    Old projects omit this metadata and keep their previous behavior.
+    """
+    frame: Box
+    rotation: float = Field(default=0, ge=-360, le=360)
+    valign: Literal["top", "middle", "bottom"] = "top"
+    lines: list[NativeLine]
+    paragraphs: list[NativeParagraph] | None = None
+    margin: tuple[float, float, float, float] = (0, 0, 0, 0)
+    reference_style: Style | None = None
 
 
 class Correction(Model):
@@ -88,6 +125,7 @@ class Text(Overlay):
     type: Literal["text"] = "text"
     text: str
     rotation: float = Field(default=0, ge=-360, le=360)
+    native_layout: NativeLayout | None = None
 
 
 class Cell(Model):
@@ -99,6 +137,7 @@ class Cell(Model):
     text: str = ""
     ocr_ids: list[str] = Field(default_factory=list)
     style: Style = Field(default_factory=Style)
+    native_layout: NativeLayout | None = None
 
 
 class Table(Overlay):

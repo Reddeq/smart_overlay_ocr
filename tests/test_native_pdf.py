@@ -83,6 +83,316 @@ def test_native_pdf_extracts_real_multiline_labels_and_merged_cells(live_pdf):
     assert sum(len(o.ocr_ids) for o in project.objects)==len(project.fragments)
 
 
+@pytest.mark.parametrize("with_vector_table",[False,True])
+def test_raster_grid_uses_pdf_text_without_starting_ocr(tmp_path,monkeypatch,with_vector_table):
+    import io
+    from PIL import ImageDraw
+    image=Image.new("RGB",(1200,800),"white")
+    draw=ImageDraw.Draw(image)
+    for x in (100,400,700):
+        draw.line((x,200,x,440),fill="black",width=3)
+    for y in (200,280,360,440):
+        draw.line((100,y,700,y),fill="black",width=3)
+    buffer=io.BytesIO()
+    image.save(buffer,format="PNG")
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    page.insert_image(page.rect,stream=buffer.getvalue())
+    for x,y,text in ((60,125,"HEADER"),(210,125,"VALUE"),
+                     (60,165,"Native PDF"),(210,165,"123"),
+                     (60,205,"Last row"),(210,205,"456")):
+        page.insert_text((x,y),text,fontsize=10)
+    if with_vector_table:
+        for x in (400,475,550):
+            page.draw_line((x,100),(x,220))
+        for y in (100,140,180,220):
+            page.draw_line((400,y),(550,y))
+        for x,y,text in ((410,125,"VECTOR"),(485,125,"VALUE"),
+                         (410,165,"One"),(485,165,"Two"),
+                         (410,205,"Three"),(485,205,"Four")):
+            page.insert_text((x,y),text,fontsize=10)
+    pdf=tmp_path/"image-grid-live-text.pdf"
+    doc.save(pdf)
+    doc.close()
+    monkeypatch.setattr("smart_overlay.ocr.PaddleEngine.__init__",
+                        lambda *a,**kw:pytest.fail("Native PDF must not initialize OCR"))
+    project=native_pdf_project(pdf)
+    tables=[o for o in project.objects if isinstance(o,Table)]
+    assert len(tables)==1+int(with_vector_table)
+    table=next(t for t in tables if any(c.text=="Native PDF" for c in t.cells))
+    assert (table.rows,table.columns)==(3,2)
+    assert any(c.text=="Native PDF" and c.style.font=="Helvetica" for c in table.cells)
+    assert project.raw["native_pdf"]["table_detection"]["raster_candidates"]==1
+    assert table.needs_review
+    validate_project(project)
+
+
+def test_vector_pdf_does_not_run_raster_table_detection(live_pdf,monkeypatch):
+    monkeypatch.setattr("smart_overlay.tables.geometric_tables",
+                        lambda *a,**kw:pytest.fail("Vector page must not need image detection"))
+    project=native_pdf_project(live_pdf)
+    assert project.raw["native_pdf"]["table_detection"]["raster_candidates"]==0
+
+
+def test_without_tables_skips_detector_and_preserves_all_text(live_pdf,monkeypatch):
+    monkeypatch.setattr("smart_overlay.native_pdf._native_tables",
+                        lambda *a:pytest.fail("Table detector must not run"))
+    project=native_pdf_project(live_pdf,detect_tables=False)
+    assert not any(isinstance(o,Table) for o in project.objects)
+    blocks=[o for o in project.objects if isinstance(o,Text)]
+    text="\n".join(o.text for o in blocks)
+    for expected in ("TERMINALS","POWER","GROUND","CONTROL PANEL","8","7"):
+        assert expected in text
+    assert any(o.text=="Power supply Module A" for o in blocks)
+    assert project.raw["native_pdf"]["detect_tables"] is False
+    validate_project(project)
+
+
+def test_valid_vector_grids_do_not_run_generic_full_page_detection(live_pdf,monkeypatch):
+    monkeypatch.setattr("smart_overlay.native_pdf._fallback_grids",
+                        lambda *a:pytest.fail("Generic detector is only a fallback"))
+    project=native_pdf_project(live_pdf)
+    assert any(isinstance(obj,Table) for obj in project.objects)
+
+
+def test_native_text_preserves_mixed_runs_in_one_editable_block(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    page.insert_text((40,60),"Normal ",fontsize=12,fontname="helv")
+    page.insert_text((81.34,60),"Bold",fontsize=12,fontname="hebo",color=(1,0,0))
+    page.insert_text((40,77),"Italic second line",fontsize=12,fontname="heit")
+    pdf=tmp_path/"rich.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf,detect_tables=False)
+    block=next(o for o in project.objects if isinstance(o,Text) and "Normal" in o.text)
+    assert "Italic second line" in block.text
+    assert block.native_layout is not None
+    runs=block.native_layout.lines[0].runs
+    assert any(r.text=="Bold" and r.bold and r.color=="#FF0000" for r in runs)
+    assert block.native_layout.lines[1].runs[0].italic
+    assert block.native_layout.lines[0].line_spacing==pytest.approx(17)
+    from smart_overlay.export import export_pptx
+    import xml.etree.ElementTree as ET
+    output=tmp_path/"rich.pptx"
+    export_pptx(project,output,Settings(inches_per_pixel=1/144),allow_unreviewed=True)
+    ns={"p":"http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(output) as archive:
+        root=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        assert len(root.findall(".//p:sp",ns))==1
+        assert root.find(".//a:rPr[@b='1']/a:solidFill/a:srgbClr[@val='FF0000']",ns) is not None
+        assert root.find(".//a:rPr[@i='1']",ns) is not None
+        paragraphs=root.findall(".//p:sp/p:txBody/a:p",ns)
+        assert len(paragraphs)==1
+        assert root.find(".//a:br",ns) is None
+        assert ''.join(t.text or '' for t in paragraphs[0].findall('.//a:t',ns))==block.text
+
+
+@pytest.mark.parametrize("font,attribute",[("hebo","b"),("heit","i")])
+def test_normal_run_does_not_inherit_first_runs_emphasis(tmp_path,font,attribute):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    page.insert_text((40,60),"Emphasis ",fontname=font,fontsize=12)
+    width=pymupdf.get_text_length("Emphasis ",fontname=font,fontsize=12)
+    page.insert_text((40+width,60),"Normal",fontsize=12)
+    pdf=tmp_path/"emphasis.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf,detect_tables=False)
+    from smart_overlay.export import export_pptx
+    import xml.etree.ElementTree as ET
+    output=tmp_path/"emphasis.pptx"
+    export_pptx(project,output,Settings(inches_per_pixel=1/144),allow_unreviewed=True)
+    ns={"a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(output) as archive:
+        root=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        normal=next(r for r in root.findall(".//a:r",ns)
+                    if r.findtext("a:t",namespaces=ns)=="Normal")
+        props=normal.find("a:rPr",ns)
+        assert props is not None
+        assert props.get(attribute,"0")=="0"
+
+
+@pytest.mark.parametrize("rotation",[90,30])
+def test_rotated_multiline_label_uses_local_coordinates(tmp_path,rotation):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    point=pymupdf.Point(230,230)
+    page.insert_text(point,"LONG ROTATED LABEL\nShort line",fontsize=12,
+                     morph=(point,pymupdf.Matrix(rotation)))
+    pdf=tmp_path/f"rotated-label-{rotation}.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf,detect_tables=False)
+    blocks=[o for o in project.objects if isinstance(o,Text)]
+    assert len(blocks)==1
+    assert blocks[0].text=="LONG ROTATED LABEL Short line"
+    assert blocks[0].rotation==pytest.approx(-rotation,abs=.01)
+    assert blocks[0].native_layout is not None
+    assert blocks[0].native_layout.frame.w>blocks[0].native_layout.frame.h
+    for line,text in zip(blocks[0].native_layout.lines,("LONG ROTATED LABEL","Short line")):
+        assert all(run.advance is not None for run in line.runs)
+        assert sum(run.advance or 0 for run in line.runs)==pytest.approx(
+            pymupdf.get_text_length(text,fontsize=12),abs=.05)
+    validate_project(project)
+
+
+def test_centered_multiline_label_stays_centered(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    for y,text in ((60,"CENTERED LONG LABEL"),(77,"Short")):
+        width=pymupdf.get_text_length(text,fontsize=12)
+        page.insert_text((250-width/2,y),text,fontsize=12)
+    pdf=tmp_path/"center.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf,detect_tables=False)
+    assert len(project.objects)==1
+    assert project.objects[0].style.align=="center"
+
+
+def test_no_tables_mode_does_not_merge_across_ruled_separator(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    page.insert_text((40,60),"TOP",fontsize=12)
+    page.insert_text((40,77),"BOTTOM",fontsize=12)
+    page.draw_line((30,66),(150,66))
+    pdf=tmp_path/"separator.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf,detect_tables=False)
+    assert len(project.objects)==2
+
+
+def test_table_cell_keeps_multiline_runs_and_original_insets(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    for y in (100,130,170,210):
+        page.draw_line((50,y),(350,y),width=1.2)
+    for x in (50,200,350):
+        page.draw_line((x,100),(x,210),width=1.2)
+    page.insert_text((60,117),"HEADER",fontsize=10,fontname="hebo")
+    page.insert_text((210,117),"VALUE",fontsize=10)
+    page.insert_text((60,144),"Line one",fontsize=10)
+    page.insert_text((60,158),"Line two",fontsize=10,fontname="heit")
+    page.insert_text((210,150),"12",fontsize=10)
+    page.insert_text((60,193),"Last",fontsize=10)
+    pdf=tmp_path/"table-rich.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf)
+    table=next(o for o in project.objects if isinstance(o,Table))
+    cell=next(c for c in table.cells if c.text=="Line one Line two")
+    assert cell.native_layout is not None
+    assert cell.native_layout.lines[1].runs[0].italic
+    assert cell.native_layout.lines[0].line_spacing==pytest.approx(14)
+    assert cell.native_layout.margin[3]==pytest.approx(10)
+    assert table.cells[0].style.bold
+    assert cell.style.border_pt==pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("edit_text",[False,True])
+def test_export_uses_current_pdf_text_and_formatting(live_pdf,tmp_path,edit_text):
+    from smart_overlay.export import export_pptx
+    import xml.etree.ElementTree as ET
+    project=native_pdf_project(live_pdf,detect_tables=False)
+    block=next(o for o in project.objects if isinstance(o,Text) and "CONTROL" in o.text)
+    if edit_text:
+        block.text="Edited label"
+    block.style.font_size=24
+    block.style.color="#FF0000"
+    block.style.bold=True
+    output=tmp_path/"edited.pptx"
+    export_pptx(project,output,Settings(inches_per_pixel=1/288),allow_unreviewed=True)
+    ns={"p":"http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(output) as archive:
+        root=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        shape=next(s for s in root.findall(".//p:sp",ns)
+                   if (name:=s.find("p:nvSpPr/p:cNvPr",ns)) is not None
+                   and name.get("name")==block.id)
+        assert "".join(t.text or "" for t in shape.findall(".//a:t",ns))==block.text
+        for props in shape.findall(".//a:rPr",ns):
+            assert props.get("sz")=="1200"
+            assert props.get("b")=="1"
+            color=props.find("a:solidFill/a:srgbClr",ns)
+            assert color is not None and color.get("val")=="FF0000"
+
+
+def test_cleared_native_label_keeps_its_own_covering_frame(live_pdf,tmp_path):
+    from smart_overlay.export import export_pptx
+    import xml.etree.ElementTree as ET
+    project=native_pdf_project(live_pdf,page_number=2)
+    block=next(o for o in project.objects if isinstance(o,Text))
+    block.text=""
+    output=tmp_path/"cleared.pptx"
+    export_pptx(project,output,Settings(inches_per_pixel=1/144))
+    ns={"p":"http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(output) as archive:
+        root=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        shapes=root.findall(".//p:sp",ns)
+        assert len(shapes)==1
+        assert shapes[0].find("p:spPr/a:solidFill",ns) is not None
+        assert "PAGE TWO" not in archive.read("ppt/slides/slide1.xml").decode("utf8")
+
+
+def test_merged_cell_uses_center_anchors_not_row_expanding_padding(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    for x in (50,150,300):
+        page.draw_line((x,50),(x,150))
+    for y in (50,70,150):
+        page.draw_line((50,y),(300,y))
+    for y in (90,110,130):
+        page.draw_line((150,y),(300,y))
+    width=pymupdf.get_text_length("GROUP",fontsize=10)
+    page.insert_text((100-width/2,114),"GROUP",fontsize=10)
+    for y,text in ((65,"HEADER"),(85,"ONE"),(105,"TWO"),(125,"THREE"),(145,"FOUR")):
+        page.insert_text((160,y),text,fontsize=8)
+    pdf=tmp_path/"centered-merge.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf)
+    table=next(o for o in project.objects if isinstance(o,Table))
+    cell=next(c for c in table.cells if c.text=="GROUP")
+    assert cell.rowspan==4
+    assert cell.style.align=="center"
+    assert cell.native_layout is not None
+    assert cell.native_layout.valign=="middle"
+    assert cell.native_layout.margin==(0,0,0,0)
+    assert cell.native_layout.lines[0].runs[0].advance==pytest.approx(width,abs=.05)
+
+
+def test_vertical_table_cell_keeps_native_text_direction(tmp_path):
+    doc=pymupdf.open()
+    page=doc.new_page(width=600,height=400)
+    for y in (100,140,180,220):
+        page.draw_line((50,y),(350,y))
+    for x in (50,200,350):
+        page.draw_line((x,100),(x,220))
+    page.insert_text((72,130),"ID",fontsize=10,rotate=90)
+    page.insert_text((210,125),"VALUE",fontsize=10)
+    page.insert_text((60,165),"Normal",fontsize=10)
+    pdf=tmp_path/"vertical-cell.pdf"
+    doc.save(pdf)
+    doc.close()
+    project=native_pdf_project(pdf)
+    table=next(o for o in project.objects if isinstance(o,Table))
+    cell=next(c for c in table.cells if c.text=="ID")
+    assert cell.native_layout is not None
+    assert cell.native_layout.rotation==-90
+    from smart_overlay.export import export_pptx
+    import xml.etree.ElementTree as ET
+    output=tmp_path/"vertical-cell.pptx"
+    export_pptx(project,output,Settings(inches_per_pixel=1/144),allow_unreviewed=True)
+    ns={"a":"http://schemas.openxmlformats.org/drawingml/2006/main"}
+    with ZipFile(output) as archive:
+        root=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        assert root.find(".//a:tcPr[@vert='vert270']",ns) is not None
+
+
 def test_background_keeps_every_pixel_of_original_drawing_including_glyphs(live_pdf):
     project=native_pdf_project(live_pdf)
     result=source_image(project)
@@ -205,24 +515,33 @@ def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_pa
         root=ET.fromstring(zipfile.read("ppt/slides/slide1.xml"))
         shape_nodes=root.findall(".//p:sp",namespaces)
         table_nodes=root.findall(".//a:tbl",namespaces)
-        object_names=[node.get("name") for node in
+        object_names=[node.get("name","") for node in
                       root.findall(".//p:sp/p:nvSpPr/p:cNvPr",namespaces)]
-        masks=[name for name in object_names if "_mask_" in name]
-        # Editable text shapes PLUS per-source-glyph masks, with no
-        # cleaned background or opaque whole-cell rectangle.
-        assert len(shape_nodes)==len(native_texts)+len(masks)
-        assert len(masks)>=len(native_texts)
+        assert not [name for name in object_names if "_mask" in name]
+        assert len(shape_nodes)==len(native_texts)
+        for shape in shape_nodes:
+            fill=shape.find("p:spPr/a:solidFill",namespaces)
+            assert fill is not None
+            alpha=fill.find(".//a:alpha",namespaces)
+            assert alpha is None or alpha.get("val")=="100000"
+        for cell in root.findall(".//a:tc",namespaces):
+            if cell.get("hMerge")=="1" or cell.get("vMerge")=="1":
+                continue
+            assert cell.find("a:tcPr/a:solidFill",namespaces) is not None
+        assert root.find(".//a:tcPr/a:lnL/a:solidFill",namespaces) is not None
         assert len(table_nodes)==len(native_tables)
         assert table_nodes[0].find(".//a:tc[@gridSpan='2']",namespaces) is not None
         source=zipfile.read("ppt/slides/slide1.xml").decode("utf-8")
         assert "CONTROL PANEL" in source
         assert "POWER" in source
-        assert "_mask_" in source
+        assert "_mask_" not in source
         # PowerPoint keeps the actual PDF font family name, but the full
         # unmodified source glyphs also remain in its picture underlay.
-        assert "<a:solidFill>" in source
+        assert root.find(".//a:solidFill",namespaces) is not None
         assert any(name.startswith("ppt/media/") and name.lower().endswith(".png")
                    for name in zipfile.namelist())
+        assert any(zipfile.read(name)==base64.b64decode(project.source.raster_b64)
+                   for name in zipfile.namelist() if name.startswith("ppt/media/"))
 
 
 

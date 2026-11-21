@@ -44,6 +44,15 @@ def test_export_rejects_invalid_slide_size(project, tmp_path):
         export_pptx(project, tmp_path / "bad.pptx", Settings(inches_per_pixel=0.1))
 
 
+def test_table_cells_use_valid_drawingml_vertical_anchors(project,tmp_path):
+    output=tmp_path/"anchors.pptx"
+    export_pptx(project,output,Settings())
+    with ZipFile(output) as archive:
+        slide=ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        for props in slide.findall(".//a:tcPr",NS):
+            assert props.get("anchor","t") in {"t","ctr","b","just","dist"}
+
+
 def test_rotated_frame_has_rotation(project, tmp_path):
     obj = project.objects[0]
     obj.rotation = 90

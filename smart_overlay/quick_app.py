@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .app import Preview
-from .input import load_image
+from .input import load_image, open_project
 from .languages import LANGUAGES
 from .one_click import OneClickResult, ProcessingCancelled, convert_drawing
 from .settings import data_dir, load_settings, save_settings
@@ -205,7 +205,7 @@ class QuickWindow(QMainWindow):
         title_group = QVBoxLayout()
         title = QLabel("Чертёж → PowerPoint")
         title.setStyleSheet("font-size: 23px; font-weight: 600;")
-        subtitle = QLabel("Редактируемые надписи и таблицы поверх исходного изображения. Один файл — один слайд.")
+        subtitle = QLabel("Редактируемые надписи и таблицы. PDF: выбранные страницы → презентации по размеру листа.")
         subtitle.setStyleSheet("color: #777;")
         title_group.addWidget(title)
         title_group.addWidget(subtitle)
@@ -249,26 +249,42 @@ class QuickWindow(QMainWindow):
         self.device_combo.setToolTip("GPU может потребовать более 6 ГБ видеопамяти. CPU медленнее.")
         self.device_combo.currentIndexChanged.connect(self.device_changed)
         mode_row.addWidget(self.device_combo)
-        self.pdf_page_label = QLabel("Страница:")
-        self.pdf_page = QSpinBox()
-        self.pdf_page.setRange(1,1)
-        self.pdf_page.setToolTip("Пока одна страница PDF конвертируется в один PPTX")
-        self.pdf_page.valueChanged.connect(self.preview_pdf_page)
-        mode_row.addWidget(self.pdf_page_label)
-        mode_row.addWidget(self.pdf_page)
-        self.pdf_overlay_combo = QComboBox()
-        self.pdf_overlay_combo.addItem("Видимые надписи · как OCR", "ocr_style")
-        self.pdf_overlay_combo.addItem("Точный оригинал · невидимые редактируемые слои", "source_exact")
-        index = self.pdf_overlay_combo.findData(self.settings.native_pdf_overlay_mode)
-        self.pdf_overlay_combo.setCurrentIndex(max(0,index))
-        self.pdf_overlay_combo.setToolTip(
-            "Точный оригинал: редактируемые текстовые объекты присутствуют, "
-            "но их цвет полностью прозрачен. Для видимого перевода "
-            "выбирайте «как OCR».")
-        self.pdf_overlay_combo.currentIndexChanged.connect(self.pdf_overlay_changed)
-        mode_row.addWidget(self.pdf_overlay_combo)
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
+        pdf_row = QHBoxLayout()
+        self.pdf_pages_label = QLabel("Обработать страницы:")
+        self.pdf_pages_input = QLineEdit()
+        self.pdf_pages_input.setMinimumWidth(200)
+        self.pdf_pages_input.setPlaceholderText("Пусто = все; например: 1, 2, 6-9")
+        self.pdf_pages_input.setToolTip("Страницы для обработки, независимо от страницы предпросмотра.")
+        pdf_row.addWidget(self.pdf_pages_label)
+        pdf_row.addWidget(self.pdf_pages_input,1)
+        self.pdf_page_label = QLabel("Предпросмотр:")
+        self.pdf_page = QSpinBox()
+        self.pdf_page.setRange(1,1)
+        self.pdf_page.setToolTip("Только предпросмотр. Страницы для обработки задаются отдельно; пусто = все.")
+        self.pdf_page.valueChanged.connect(self.preview_pdf_page)
+        pdf_row.addWidget(self.pdf_page_label)
+        pdf_row.addWidget(self.pdf_page)
+        self.pdf_tables_combo = QComboBox()
+        self.pdf_tables_combo.addItem("С таблицами", True)
+        self.pdf_tables_combo.addItem("Без таблиц", False)
+        index = self.pdf_tables_combo.findData(self.settings.native_pdf_detect_tables)
+        self.pdf_tables_combo.setCurrentIndex(max(0,index))
+        self.pdf_tables_combo.setToolTip(
+            "С таблицами: восстанавливать ячейки и объединения. Без таблиц: "
+            "извлекать только текстовые блоки. В обоих режимах текст видим и редактируем.")
+        self.pdf_tables_combo.currentIndexChanged.connect(self.pdf_tables_changed)
+        pdf_row.addWidget(self.pdf_tables_combo)
+        self.pdf_ignore_numbers_checkbox = QCheckBox("Игнорировать числа")
+        self.pdf_ignore_numbers_checkbox.setChecked(self.settings.native_pdf_ignore_numbers)
+        self.pdf_ignore_numbers_checkbox.setToolTip(
+            "Только цифровой PDF: игнорировать отдельные числовые надписи; "
+            "они останутся только на PNG, без редактируемого текста. "
+            "Ячейки таблиц всегда сохраняют все числа.")
+        self.pdf_ignore_numbers_checkbox.toggled.connect(self.pdf_ignore_numbers_changed)
+        pdf_row.addWidget(self.pdf_ignore_numbers_checkbox)
+        layout.addLayout(pdf_row)
 
         language_row = QHBoxLayout()
         language_row.addWidget(QLabel("Языки OCR:"))
@@ -303,6 +319,11 @@ class QuickWindow(QMainWindow):
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
         actions.addWidget(self.summary, 1)
+        self.output_combo = QComboBox()
+        self.output_combo.setMinimumContentsLength(25)
+        self.output_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.output_combo.hide()
+        actions.addWidget(self.output_combo)
         self.open_pptx = QPushButton("Открыть PPTX")
         self.open_pptx.clicked.connect(self.open_result)
         self.open_pptx.hide()
@@ -324,7 +345,12 @@ class QuickWindow(QMainWindow):
         pdf_selected = bool(self.path and self.path.suffix.lower() == ".pdf")
         self.pdf_page_label.setVisible(engine == "native_pdf" and pdf_selected)
         self.pdf_page.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_overlay_combo.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_tables_combo.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_ignore_numbers_checkbox.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_pages_label.setVisible(engine == "native_pdf" and pdf_selected)
+        self.pdf_pages_input.setVisible(engine == "native_pdf" and pdf_selected)
+        for control in (self.pdf_tables_combo, self.pdf_ignore_numbers_checkbox, self.pdf_pages_input):
+            control.setEnabled(engine == "native_pdf" and pdf_selected and self.worker is None)
         self.run_button.setText("Извлечь PDF → PPTX" if engine == "native_pdf"
                                 else "Распознать → PPTX")
         if self.path and self.worker is None:
@@ -340,8 +366,12 @@ class QuickWindow(QMainWindow):
             if engine == "vl_local" else "Smart OCR готов")
         self._save_mode()
 
-    def pdf_overlay_changed(self, *_):
-        self.settings.native_pdf_overlay_mode = self.pdf_overlay_combo.currentData()
+    def pdf_ignore_numbers_changed(self, checked):
+        self.settings.native_pdf_ignore_numbers = checked
+        self._save_mode()
+
+    def pdf_tables_changed(self, *_):
+        self.settings.native_pdf_detect_tables = self.pdf_tables_combo.currentData()
         self._save_mode()
 
     def device_changed(self, *_):
@@ -415,6 +445,9 @@ class QuickWindow(QMainWindow):
             QMessageBox.warning(self,"Открытие файла",str(exc))
             return
         self.path=selected
+        self.pdf_pages_input.clear()
+        self.output_combo.clear()
+        self.output_combo.hide()
         if selected.suffix.lower()==".pdf":
             native_index=self.mode_combo.findData("native_pdf")
             self.mode_combo.setCurrentIndex(native_index)
@@ -453,6 +486,16 @@ class QuickWindow(QMainWindow):
             return
         consent = False
         engine = self.mode_combo.currentData()
+        pages_spec = self.pdf_pages_input.text()
+        if engine == "native_pdf":
+            from .pdf_pages import parse_pdf_pages
+            try:
+                parse_pdf_pages(pages_spec, self.pdf_page.maximum())
+            except ValueError as exc:
+                QMessageBox.warning(self, "Страницы PDF",
+                                    f"Неверный выбор {pages_spec!r}: {exc}\n"
+                                    "Укажите 1, 2, 6-9 или оставьте поле пустым для всех страниц.")
+                return
         local_vl = engine == "vl_local"
         if engine == "cloud_full":
             if not self.api_key:
@@ -509,13 +552,18 @@ class QuickWindow(QMainWindow):
         self.set_busy(True)
         self.summary.setText("")
         self.status_text.setText("Начинаю распознавание…")
-        self.worker = ConvertWorker(
-            lambda report, stop: convert_drawing(source, settings=settings, api_key=key,
+        if engine == "native_pdf":
+            from .pdf_batch import convert_pdf_pages
+            work = lambda report, stop: convert_pdf_pages(
+                source, pages=pages_spec, settings=settings, progress=report, cancelled=stop)
+        else:
+            work = lambda report, stop: convert_drawing(source, settings=settings, api_key=key,
                                                  consent=consent, proxy=proxy,
                                                  ocr_engine=engine, vl_device=device,
                                                  vl_diagnostics=diagnostics,
                                                  pdf_page=pdf_page,
-                                                 progress=report, cancelled=stop), self)
+                                                 progress=report, cancelled=stop)
+        self.worker = ConvertWorker(work, self)
         self.worker.progress.connect(self.status_text.setText)
         self.worker.completed.connect(self.done)
         self.worker.failed.connect(self.failed)
@@ -526,12 +574,17 @@ class QuickWindow(QMainWindow):
     def set_busy(self, busy):
         for widget in (self.pick, self.run_button, self.config,
                        self.language_button, self.mode_combo, self.device_combo,
-                       self.pdf_page, self.pdf_overlay_combo):
+                       self.pdf_page):
             widget.setEnabled(not busy)
+        native_pdf = (self.mode_combo.currentData() == "native_pdf"
+                      and bool(self.path and self.path.suffix.lower() == ".pdf"))
+        for control in (self.pdf_tables_combo, self.pdf_ignore_numbers_checkbox, self.pdf_pages_input):
+            control.setEnabled(not busy and native_pdf)
         self.progress.setVisible(busy)
         self.cancel.setVisible(busy)
         self.open_pptx.setEnabled(not busy)
-        self.review.setEnabled(not busy)
+        self.output_combo.setEnabled(not busy)
+        self.review.setEnabled(not busy and not hasattr(self.result, "groups"))
 
     def cancel_work(self):
         if self.worker:
@@ -540,14 +593,49 @@ class QuickWindow(QMainWindow):
             self.cancel.setEnabled(False)
 
     def done(self, result):
+        # A one-page selection still uses the existing single-project editor.
+        if (hasattr(result,"groups") and len(result.selected_pages)==1
+                and len(result.groups)==1):
+            group=result.groups[0]
+            self.done(OneClickResult(project=open_project(group.project_files[0]),
+                                     pptx=group.pptx,project_file=group.project_files[0],
+                                     warnings=result.warnings))
+            return
         self.result = result
+        self.output_combo.clear()
+        if hasattr(result, "groups"):
+            for group in result.groups:
+                self.output_combo.addItem(
+                    f"{group.pptx.name} · страницы {', '.join(map(str, group.pages))}", group.pptx)
+            self.output_combo.setVisible(bool(result.groups))
+            self.open_pptx.setVisible(bool(result.groups))
+            self.review.hide()
+            self.review.setEnabled(False)
+            if result.groups and result.groups[0].project_files:
+                self.preview.show_project(open_project(result.groups[0].project_files[0]))
+            notes = [f"Готово: {len(result.selected_pages)} страниц; на проверку: {result.needs_review}."]
+            notes.extend(str(group.pptx) for group in result.groups[:2])
+            if len(result.groups)>2:
+                notes.append(f"Ещё файлов: {len(result.groups)-2}; все доступны в списке.")
+            notes.extend(result.warnings[:2])
+            if len(result.warnings)>2:
+                notes.append(f"Других замечаний: {len(result.warnings)-2}; подробности в проектах страниц.")
+            notes.append("Предпросмотр: первая страница первой группы. Редактор проектов не редактирует всю презентацию.")
+            self.summary.setText("\n".join(notes))
+            self.status_text.setText("PowerPoint создан: выберите файл для открытия")
+            return
+        self.output_combo.hide()
         self.preview.show_project(result.project)
         self.open_pptx.show()
         self.review.show()
         notes = [f"Готово: {result.pptx.name}",
                  f"Объектов: {len(result.project.objects)}; на проверку: {result.needs_review}."]
         if result.project.source.mode == "PDF":
-            if result.project.raw.get("native_pdf",{}).get("overlay_mode")=="source_exact":
+            overlay_mode = result.project.raw.get("native_pdf",{}).get("overlay_mode")
+            if overlay_mode == "editable":
+                notes.append("Видимый редактируемый текст; исходные надписи закрыты "
+                             "заливкой самих фреймов и ячеек.")
+            elif overlay_mode == "source_exact":
                 notes.append("Точный оригинал: редактируемый текст невидим. "
                              "Для видимого перевода требуется экспорт «как OCR».")
             detected=result.project.raw.get("native_pdf",{}).get("source_fonts",[])
@@ -586,10 +674,12 @@ class QuickWindow(QMainWindow):
 
     def open_result(self):
         if self.result:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.result.pptx)))
+            path = self.output_combo.currentData() if hasattr(self.result, "groups") else self.result.pptx
+            if path:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def open_editor(self):
-        if not self.result:
+        if not self.result or hasattr(self.result, "groups"):
             return
         from .app import MainWindow
         self.editor = MainWindow()

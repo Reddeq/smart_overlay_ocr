@@ -1,17 +1,20 @@
 """Recover CAD table grids from the actual PDF strokes, without visual OCR.
 
 PyMuPDF's generic find_tables() can mistake an entire engineering drawing
-frame for one huge table and merge several real columns. Here, repeatedly
-drawn horizontal CAD strokes become table *candidates*; continuous vertical
-and horizontal strokes determine the precise grid and actual merges.
+frame for one huge table. Intersecting stroked edges form closed rectangular
+faces, including narrow side tables and irregular merged title blocks.
+Dense hatch strokes are filtered before topology recovery; changes in the
+column structure separate an adjacent specification from its title block.
+Repeated-row CAD seeds remain a fallback, not a condition for every table.
 
-Heuristic discovery never changes text. Candidates are accepted only when
-they have a dense orthogonal grid, rectangular cell merges and sufficient
-real extracted characters. Synthetic tests exercise this independently.
+Heuristic discovery never changes text. Closed-face candidates require ruled
+borders and rectangular cell merges; editable reconstruction independently
+checks actual extracted characters. Synthetic tests exercise this separately.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from statistics import median
 
@@ -63,24 +66,29 @@ def _cluster(values, tolerance=.8):
     return [median(group) for group in clusters]
 
 
-def _strokes(page):
+def _strokes(page,drawings=None):
     horizontal=set()
     vertical=set()
-    for path in page.get_drawings():
-        # Only explicitly drawn straight lines. Ignore filled rectangles,
-        # curves and glyph outlines represented by path fill operations.
+    for path in page.get_drawings() if drawings is None else drawings:
+        # Only stroked straight edges; fill-only rectangles are not rules.
         if path.get("type") not in ("s","fs"):
             continue
         for item in path.get("items",[]):
-            if item[0]!="l":
+            if item[0]=="l":
+                segments=[item[1:3]]
+            elif item[0]=="re":
+                rect=item[1]
+                segments=[(rect.tl,rect.tr),(rect.tr,rect.br),
+                          (rect.br,rect.bl),(rect.bl,rect.tl)]
+            else:
                 continue
-            a,b=item[1:3]
-            if abs(a.y-b.y)<.2 and abs(a.x-b.x)>5:
-                horizontal.add((round((a.y+b.y)/2,1),
-                                round(min(a.x,b.x),1),round(max(a.x,b.x),1)))
-            elif abs(a.x-b.x)<.2 and abs(a.y-b.y)>5:
-                vertical.add((round((a.x+b.x)/2,1),
-                              round(min(a.y,b.y),1),round(max(a.y,b.y),1)))
+            for a,b in segments:
+                if abs(a.y-b.y)<.2 and abs(a.x-b.x)>5:
+                    horizontal.add((round((a.y+b.y)/2,1),
+                                    round(min(a.x,b.x),1),round(max(a.x,b.x),1)))
+                elif abs(a.x-b.x)<.2 and abs(a.y-b.y)>5:
+                    vertical.add((round((a.x+b.x)/2,1),
+                                  round(min(a.y,b.y),1),round(max(a.y,b.y),1)))
     return sorted(horizontal),sorted(vertical)
 
 
@@ -232,10 +240,183 @@ def _grid_from_seed(group,horizontal,vertical,page):
                       tuple(xs),tuple(ys),tuple(cells))
 
 
-def discover_vector_grids(page):
-    """Return only strong ruled-table candidates from vector coordinates."""
-    horizontal,vertical=_strokes(page)
+def _joined_strokes(strokes):
+    result=[]
+    for coordinate,segments in _stroke_index(strokes).items():
+        merged=[]
+        for a,b in sorted(segments):
+            if merged and a<=merged[-1][1]+.8:
+                merged[-1]=(merged[-1][0],max(b,merged[-1][1]))
+            else:
+                merged.append((a,b))
+        result.extend((coordinate,a,b) for a,b in merged)
+    return sorted(result)
+
+
+def _crossings(coordinate,start,stop,keys,index):
+    return [key for key in keys[bisect_left(keys,start-.8):bisect_right(keys,stop+.8)]
+            if any(a-.8<=coordinate<=b+.8 for a,b in index[key])]
+
+
+def _without_dense_fill(strokes,perpendicular):
+    by_span=defaultdict(list)
+    for stroke in strokes:
+        by_span[stroke[1:]].append(stroke)
+    ends=defaultdict(set)
+    for x,a,b in perpendicular:
+        ends[a].add(x)
+        ends[b].add(x)
+    keys=sorted(ends)
+    removed=set()
+    for series in by_span.values():
+        runs=[]
+        for stroke in sorted(series):
+            if runs and stroke[0]-runs[-1][-1][0]<1.5:
+                runs[-1].append(stroke)
+            else:
+                runs.append([stroke])
+        for run in runs:
+            if len(run)<4:
+                continue
+            for y,a,b in run:
+                junctions={x for key in keys[bisect_left(keys,y-.4):bisect_right(keys,y+.4)]
+                           for x in ends[key] if a-.8<=x<=b+.8}
+                if len(junctions)<2:
+                    removed.add((y,a,b))
+    return [stroke for stroke in strokes if stroke not in removed]
+
+
+def _connected_rules(horizontal,vertical):
+    """Keep actual line junctions rather than floating glyph/hatching strokes."""
+    horizontal,vertical=_joined_strokes(horizontal),_joined_strokes(vertical)
+    horizontal,vertical=(_without_dense_fill(horizontal,vertical),
+                         _without_dense_fill(vertical,horizontal))
+    vx=_stroke_index(vertical)
+    xs=sorted(vx)
+    rules=[]
+    for y,a,b in horizontal:
+        joins=_crossings(y,a,b,xs,vx)
+        if joins and abs(joins[0]-a)<=.8 and abs(joins[-1]-b)<=.8:
+            rules.append((y,a,b))
+    hy=_stroke_index(rules)
+    ys=sorted(hy)
+    uprights=[]
+    for x,a,b in vertical:
+        joins=_crossings(x,a,b,ys,hy)
+        if len(joins)>=2:
+            uprights.append((x,a,b))
+    return rules,uprights
+
+
+def _closed_grid(bounds,horizontal,vertical):
+    """Build rectangular merged faces, including irregular title blocks."""
+    x0,y0,x1,y1=bounds
+    xs=_cluster([x0,x1]+[x for x,a,b in vertical if x0+.8<x<x1-.8
+                         and min(b,y1)-max(a,y0)>3])
+    ys=_cluster([y0,y1]+[y for y,a,b in horizontal if y0+.8<y<y1-.8
+                         and min(b,x1)-max(a,x0)>3])
+    nc,nr=len(xs)-1,len(ys)-1
+    if not (2<=nc<=34 and 2<=nr<=150 and nc*nr<=1600):
+        return None
+    hy,vx=_stroke_index(horizontal),_stroke_index(vertical)
+    def covered(index,coordinate,a,b):
+        segments=[segment for key,spans in index.items() if abs(key-coordinate)<1.0
+                  for segment in spans]
+        return _union_coverage(segments,a,b)>.92*(b-a)
+    parent=list(range(nr*nc))
+    def root(i):
+        while parent[i]!=i:
+            parent[i]=parent[parent[i]]
+            i=parent[i]
+        return i
+    for r in range(nr):
+        for c in range(nc):
+            i=r*nc+c
+            if c+1<nc and not covered(vx,xs[c+1],ys[r],ys[r+1]):
+                parent[root(i)]=root(i+1)
+            if r+1<nr and not covered(hy,ys[r+1],xs[c],xs[c+1]):
+                parent[root(i)]=root(i+nc)
+    components=defaultdict(list)
+    for i in range(nr*nc):
+        components[root(i)].append((i//nc,i%nc))
+    cells=[]
+    for component in components.values():
+        r0=min(r for r,c in component);r1=max(r for r,c in component)+1
+        c0=min(c for r,c in component);c1=max(c for r,c in component)+1
+        if len(component)!=(r1-r0)*(c1-c0):
+            return None
+        a,b,c,d=xs[c0],ys[r0],xs[c1],ys[r1]
+        if not (covered(hy,b,a,c) and covered(hy,d,a,c)
+                and covered(vx,a,b,d) and covered(vx,c,b,d)):
+            return None
+        cells.append(GridCell(r0,c0,r1-r0,c1-c0,(a,b,c,d)))
+    if len(cells)<4:
+        return None
+    return VectorGrid(bounds,tuple(xs),tuple(ys),
+                      tuple(sorted(cells,key=lambda cell:(cell.row,cell.col))),"vector_topology")
+
+
+def _partition_levels(levels,left,right,vertical):
+    """Shared outer borders do not make a specification and stamp one table."""
+    breaks=[0]
+    for i,y in enumerate(levels[1:-1],1):
+        before=max(levels[i-1],y-50)
+        after=min(levels[i+1],y+50)
+        above={round(x,1) for x,a,b in vertical if left-.8<=x<=right+.8
+               and min(b,y)-max(a,before)>max(2.,(y-before)*.2)}
+        below={round(x,1) for x,a,b in vertical if left-.8<=x<=right+.8
+               and min(b,after)-max(a,y)>max(2.,(after-y)*.2)}
+        if (len(above)>=3 and len(below)>=3
+                and len(above & below)<.4*len(above | below)):
+            breaks.append(i)
+    breaks.append(len(levels)-1)
+    return [levels[a:b+1] for a,b in zip(breaks,breaks[1:])]
+
+
+def _closed_grids(page,horizontal,vertical):
+    horizontal,vertical=_connected_rules(horizontal,vertical)
+    vx=_stroke_index(vertical)
+    xs=sorted(vx)
+    boundaries=defaultdict(set)
+    for y,a,b in horizontal:
+        joins=_crossings(y,a,b,xs,vx)
+        for i,left in enumerate(joins):
+            for right in joins[i+1:]:
+                if right-left>=8:
+                    boundaries[(left,right)].add(y)
     proposals=[]
+    for (left,right),levels in boundaries.items():
+        groups=[]
+        for y in sorted(levels):
+            if groups and all(_union_coverage(vx[x],groups[-1][-1],y)>.98*(y-groups[-1][-1])
+                              for x in (left,right)):
+                groups[-1].append(y)
+            else:
+                groups.append([y])
+        for group in [part for levels in groups
+                      for part in _partition_levels(levels,left,right,vertical)]:
+            if len(group)<3:
+                continue
+            bounds=(left,group[0],right,group[-1])
+            if _area(bounds)>page.rect.get_area()*.24:
+                continue
+            own_h=[s for s in horizontal if bounds[1]-.8<=s[0]<=bounds[3]+.8]
+            own_v=[s for s in vertical if left-.8<=s[0]<=right+.8]
+            grid=_closed_grid(bounds,own_h,own_v)
+            if grid is not None:
+                proposals.append(grid)
+    result=[]
+    for grid in sorted(proposals,key=lambda g:-_area(g.bbox)):
+        if not any(_overlap(grid.bbox,other.bbox)>.2*min(_area(grid.bbox),_area(other.bbox))
+                   for other in result):
+            result.append(grid)
+    return result
+
+
+def discover_vector_grids(page,drawings=None):
+    """Return only strong ruled-table candidates from vector coordinates."""
+    horizontal,vertical=_strokes(page,drawings)
+    proposals=_closed_grids(page,horizontal,vertical)
     for group in _seed_groups(horizontal):
         grid=_grid_from_seed(group,horizontal,vertical,page)
         if grid is None:

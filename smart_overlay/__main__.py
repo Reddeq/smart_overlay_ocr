@@ -21,11 +21,19 @@ def main():
     one = sub.add_parser("convert", help="One-click drawing to editable PPTX")
     one.add_argument("image", type=Path)
     one.add_argument("--output", type=Path)
-    one.add_argument("--pdf-page", type=int, default=1,
+    pdf_selection = one.add_mutually_exclusive_group()
+    pdf_selection.add_argument("--pdf-page", type=int, default=1,
                      help="Page number of a born-digital PDF (1-based; one slide per conversion)")
+    pdf_selection.add_argument("--pdf-pages", type=str, default=None,
+                               help="Native PDF batch: 'all' or selection such as '1, 2, 6-9'; "
+                                    "--output is the filename base for size-grouped decks")
     one.add_argument("--pdf-overlay-mode", choices=["ocr_style", "source_exact"],
-                     help="ocr_style: visible editable text; source_exact: pixel-identical original "
-                          "with transparent editable text for CAT")
+                     help="Deprecated compatibility option; ignored for new conversions")
+    one.add_argument("--pdf-tables", action=argparse.BooleanOptionalAction, default=None,
+                     help="Detect native PDF tables (default: saved setting, otherwise enabled)")
+    one.add_argument("--pdf-ignore-numbers", action=argparse.BooleanOptionalAction, default=None,
+                     help="Native PDF only: ignore standalone numeric labels (PNG-only); "
+                          "table cells always keep all numbers (default: saved setting, otherwise disabled)")
     one.add_argument("--settings", type=Path)
     one.add_argument("--languages", help="Comma-separated manual OCR languages, e.g. ru,en or ch,ru")
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
@@ -126,6 +134,11 @@ def main():
         return 0
     if args.command == "convert":
         from .one_click import convert_drawing
+        if args.pdf_pages is not None:
+            if args.image.suffix.lower() != ".pdf":
+                parser.error("--pdf-pages requires a born-digital PDF input")
+            if args.smart or args.ocr_engine not in (None, "native_pdf"):
+                parser.error("--pdf-pages uses native PDF only, without cloud or OCR")
         if args.smart and args.ocr_engine in ("vl_local", "hybrid_local"):
             parser.error("Local VL/hybrid and --smart (cloud) are mutually exclusive")
         if args.smart and not args.consent_api:
@@ -134,6 +147,9 @@ def main():
             parser.error("Full cloud OCR requires --consent-api for this drawing")
         settings = (Settings.model_validate_json(args.settings.read_text("utf-8"))
                     if args.settings else Settings(ocr_language_mode="auto"))
+        if args.pdf_pages is not None:
+            settings.ocr_engine = "native_pdf"
+            args.ocr_engine = "native_pdf"
         if args.smart and (args.ocr_engine or settings.ocr_engine) in ("vl_local", "hybrid_local"):
             parser.error("Local PaddleOCR-VL/hybrid cannot be combined with cloud --smart")
         if (args.ocr_engine or settings.ocr_engine) == "cloud_full" and not args.consent_api:
@@ -145,7 +161,8 @@ def main():
             settings = Settings.model_validate({**settings.model_dump(),
                 "ocr_version": "PP-OCRv5", "ocr_language_mode": "manual",
                 "ocr_languages": codes})
-        overrides = {"native_pdf_overlay_mode": args.pdf_overlay_mode,
+        overrides = {"native_pdf_detect_tables": args.pdf_tables,
+                     "native_pdf_ignore_numbers": args.pdf_ignore_numbers,
                      "vl_tile_size": args.vl_tile_size,
                      "vl_tile_timeout_seconds": args.vl_tile_timeout,
                      "vl_max_new_tokens": args.vl_max_new_tokens,
@@ -172,6 +189,18 @@ def main():
                 **settings.model_dump(),
                 "ensemble_batch_vl": not args.ensemble_only,
                 "ensemble_apply_consensus": args.ensemble_apply_consensus})
+        if args.pdf_pages is not None:
+            from .pdf_batch import convert_pdf_pages
+            try:
+                result = convert_pdf_pages(args.image, pages=args.pdf_pages,
+                                           destination=args.output, settings=settings, progress=print)
+            except (ValueError, OSError) as exc:
+                parser.error(f"PDF batch: {exc}")
+            for group in result.groups:
+                print(group.pptx)
+            for warning in result.warnings:
+                logging.warning(warning)
+            return 0
         result = convert_drawing(args.image, destination=args.output, settings=settings,
                                  api_key=os.environ.get("OPENROUTER_API_KEY", ""),
                                  consent=args.consent_api and
