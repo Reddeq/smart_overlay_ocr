@@ -447,6 +447,44 @@ def _styles_for_group(lines,samples):
     )
 
 
+def _separate_logical_blocks(lines, samples):
+    """One PDF block may include dozens of adjacent drawing columns.
+
+    A logical CAT paragraph is vertically consecutive, left-aligned,
+    single-font and single-direction. Same-baseline column headers are NOT
+    concatenated with newlines merely because a PDF producer grouped them.
+    """
+    buckets=[]
+    for frag in sorted(lines,key=lambda f:(f.bbox.y,f.bbox.x)):
+        sample=samples.get(frag.id,{})
+        best=None
+        best_gap=None
+        for bucket in buckets:
+            last=bucket[-1]
+            previous=samples.get(last.id,{})
+            if (_font_name(sample.get("font"))!=_font_name(previous.get("font"))
+                    or abs(frag.rotation-last.rotation)>1):
+                continue
+            dx=abs(frag.bbox.x-last.bbox.x)
+            if dx>max(3.,min(frag.bbox.h,last.bbox.h)*.65):
+                continue
+            vertical_gap=frag.bbox.y-last.bbox.bottom
+            # A real multiline label has consecutive baseline positions.
+            # Equal-baseline fragments are probably neighboring table columns.
+            if vertical_gap<(-.20*min(frag.bbox.h,last.bbox.h)):
+                continue
+            if vertical_gap>max(5.,last.bbox.h*.45):
+                continue
+            if best_gap is None or abs(vertical_gap)<best_gap:
+                best=bucket
+                best_gap=abs(vertical_gap)
+        if best is None:
+            buckets.append([frag])
+        else:
+            best.append(frag)
+    return buckets
+
+
 def _pdf_text_objects(fragments, groups, table_ids, samples):
     by_id={f.id:f for f in fragments}
     objects=[]
@@ -454,26 +492,28 @@ def _pdf_text_objects(fragments, groups, table_ids, samples):
         free=[by_id[i] for i in ids if i not in table_ids]
         if not free:
             continue
-        # A text block can partially overlap a table: only join remaining
-        # lines belonging to the same PDF text block.
-        x0=min(f.bbox.x for f in free)
-        y0=min(f.bbox.y for f in free)
-        x1=max(f.bbox.right for f in free)
-        y1=max(f.bbox.bottom for f in free)
-        bbox=Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
-        bad_encoding=any("\ufffd" in f.text or "\x00" in f.text for f in free)
-        objects.append(Text(
-            id=uid("pdf_block"),bbox=bbox,text="\n".join(f.text for f in free),
-            ocr_ids=[f.id for f in free],
-            style=_styles_for_group(free,samples),
-            confidence=1.0,rotation=free[0].rotation,
-            needs_review=bad_encoding or
-                any(abs(f.rotation-free[0].rotation)>1 for f in free),
-            review_notes=(["PDF: подозрительная кодировка либо поворот текста"]
-                          if bad_encoding or any(
-                             abs(f.rotation-free[0].rotation)>1 for f in free)
-                          else []),
-        ))
+        for members in _separate_logical_blocks(free,samples):
+            x0=min(f.bbox.x for f in members)
+            y0=min(f.bbox.y for f in members)
+            x1=max(f.bbox.right for f in members)
+            y1=max(f.bbox.bottom for f in members)
+            bbox=Box(x=x0,y=y0,w=x1-x0,h=y1-y0)
+            bad_encoding=any(
+                "\ufffd" in f.text or "\x00" in f.text or
+                any("\uac00" <= ch <= "\ud7af" for ch in f.text)
+                for f in members)
+            uneven=any(abs(f.rotation-members[0].rotation)>1 for f in members)
+            objects.append(Text(
+                id=uid("pdf_block"),bbox=bbox,
+                text="\n".join(f.text for f in members),
+                ocr_ids=[f.id for f in members],
+                style=_styles_for_group(members,samples),
+                confidence=1.0,rotation=members[0].rotation,
+                needs_review=bad_encoding or uneven,
+                review_notes=(
+                    ["PDF: проверьте шрифт/кодировку или поворот текста"]
+                    if bad_encoding or uneven else []),
+            ))
     return objects
 
 
@@ -521,8 +561,19 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,progress=lambda _:None
         clean_png=_clean_background(raw,page_number,zoom)
         source.raster_b64=base64.b64encode(clean_png).decode("ascii")
         result=Project(source=source,fragments=fragments,objects=[*tables,*texts])
+        detected_fonts=sorted({
+            _font_name(sample.get("font","")) for sample in samples.values()
+            if sample.get("font")})
+        if any(name not in ("Arial","Calibri","Times New Roman",
+                            "Helvetica","Courier") for name in detected_fonts):
+            result.messages.append(
+                "PDF использует специальный шрифт: "+
+                ", ".join(detected_fonts[:10])+
+                ". Для совпадения в PowerPoint он должен быть установлен "
+                "на компьютере; шрифты из PDF не распространяются.")
         result.raw["native_pdf"]={
             "page":page_number,"pages":len(doc),"zoom":zoom,
+            "source_fonts":detected_fonts,
             "page_size_pt":[page.rect.width,page.rect.height],
             "extracted_lines":extracted_lines,
             "cell_fragments":len(cell_fragments),
