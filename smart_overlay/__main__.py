@@ -21,12 +21,14 @@ def main():
     one = sub.add_parser("convert", help="One-click drawing to editable PPTX")
     one.add_argument("image", type=Path)
     one.add_argument("--output", type=Path)
+    one.add_argument("--pdf-page", type=int, default=1,
+                     help="Page number of a born-digital PDF (1-based; one slide per conversion)")
     one.add_argument("--settings", type=Path)
     one.add_argument("--languages", help="Comma-separated manual OCR languages, e.g. ru,en or ch,ru")
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
     one.add_argument("--consent-api", action="store_true", help="Allow sending this drawing to OpenRouter")
     one.add_argument("--proxy", help="Existing Xray HTTP proxy, e.g. http://127.0.0.1:10809")
-    one.add_argument("--ocr-engine", choices=["smart", "vl_local", "hybrid_local", "cloud_full"], default=None,
+    one.add_argument("--ocr-engine", choices=["smart", "vl_local", "hybrid_local", "cloud_full", "native_pdf"], default=None,
                      help="Use classic Smart OCR or independent, fully local PaddleOCR-VL 1.6")
     one.add_argument("--cloud-model", help="OpenRouter image-capable model, e.g. google/gemini-2.5-pro")
     one.add_argument("--cloud-max-requests", type=int, help="Maximum paid image requests")
@@ -172,7 +174,8 @@ def main():
                                          (args.smart or (args.ocr_engine or settings.ocr_engine)=="cloud_full"),
                                  proxy=args.proxy,
                                  ocr_engine=args.ocr_engine, vl_device=args.vl_device,
-                                 vl_diagnostics=args.vl_diagnostics, progress=print)
+                                 vl_diagnostics=args.vl_diagnostics,
+                                 pdf_page=args.pdf_page, progress=print)
         print(result.pptx)
         for warning in result.warnings:
             logging.warning(warning)
