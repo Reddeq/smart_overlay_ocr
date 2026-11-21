@@ -205,7 +205,8 @@ def test_real_pptx_has_editable_pdf_text_and_native_merged_table(live_pdf,tmp_pa
         root=ET.fromstring(zipfile.read("ppt/slides/slide1.xml"))
         shape_nodes=root.findall(".//p:sp",namespaces)
         table_nodes=root.findall(".//a:tbl",namespaces)
-        object_names=root.xpath(".//p:sp/p:nvSpPr/p:cNvPr/@name",namespaces)
+        object_names=[node.get("name") for node in
+                      root.findall(".//p:sp/p:nvSpPr/p:cNvPr",namespaces)]
         masks=[name for name in object_names if "_mask_" in name]
         # Editable text shapes PLUS per-source-glyph masks, with no
         # cleaned background or opaque whole-cell rectangle.
