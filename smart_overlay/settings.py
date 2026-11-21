@@ -11,6 +11,9 @@ from .models import Model
 
 class Settings(Model):
     ocr_engine: Literal["smart", "vl_local", "hybrid_local", "cloud_full", "native_pdf"] = "smart"
+    # OCR-style: visible editable overlays on the untouched original page.
+    # Source-exact: invisible editable text atop pixel-identical original PDF.
+    native_pdf_overlay_mode: Literal["ocr_style", "source_exact"] = "ocr_style"
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
     hybrid_max_checks: int = Field(default=3, ge=0, le=30)
     hybrid_confidence: float = Field(default=0.74, ge=0, le=1)
