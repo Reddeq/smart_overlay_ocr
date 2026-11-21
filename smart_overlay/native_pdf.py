@@ -193,9 +193,19 @@ def _edge_index(edges,value):
 
 
 def _rect_overlap(rect,box):
-    left=max(rect.x0,box.x); top=max(rect.y0,box.y)
-    right=min(rect.x1,box.right); bottom=min(rect.y1,box.bottom)
+    # Both boxes must be in the SAME PDF-point coordinate space.
+    x0,y0,x1,y1 = (box.x0,box.y0,box.x1,box.y1) if hasattr(box,"x0") else (
+        box.x,box.y,box.right,box.bottom)
+    left=max(rect.x0,x0); top=max(rect.y0,y0)
+    right=min(rect.x1,x1); bottom=min(rect.y1,y1)
     return max(0,right-left)*max(0,bottom-top)
+
+
+def _fragment_pdf_bbox(frag,zoom):
+    """Fragments are stored in 2× raster pixels; tables use PDF points."""
+    fitz=_pdf_lib()
+    box=frag.bbox
+    return fitz.Rect(box.x/zoom,box.y/zoom,box.right/zoom,box.bottom/zoom)
 
 
 def _native_tables(page, fragments, zoom):
@@ -244,8 +254,8 @@ def _native_tables(page, fragments, zoom):
             continue
         table_fragments=[frag for frag in fragments
                          if frag.id not in assigned and
-                         _rect_overlap(bbox,frag.bbox)>
-                         .48*frag.bbox.w*frag.bbox.h]
+                         _rect_overlap(bbox,_fragment_pdf_bbox(frag,zoom))>
+                         .48*frag.bbox.w*frag.bbox.h/(zoom*zoom)]
         if len(table_fragments)<2:
             # Diagram wires can accidentally be identified as empty tables.
             continue
@@ -263,8 +273,8 @@ def _native_tables(page, fragments, zoom):
         for cellrect,r,c,rs,cs in possible:
             owned=[frag for frag in table_fragments
                    if frag.id not in seen and
-                   _rect_overlap(cellrect,frag.bbox)>
-                   .48*frag.bbox.w*frag.bbox.h]
+                   _rect_overlap(cellrect,_fragment_pdf_bbox(frag,zoom))>
+                   .48*frag.bbox.w*frag.bbox.h/(zoom*zoom)]
             for frag in owned:
                 seen.add(frag.id)
             owned.sort(key=lambda f:(f.bbox.y,f.bbox.x))
@@ -277,7 +287,8 @@ def _native_tables(page, fragments, zoom):
                                           border_pt=0)))
         # Fragment centers lying between cells need manual review, not duplication.
         if any(f.id not in seen for f in table_fragments):
-            ambiguous=True
+            rejected.append(f"Таблица #{index}: текст на границе ячейки, оставлен как обычный блок")
+            continue
         if not table_ids:
             continue
         pixel_x=[max(0,min(page.rect.width*zoom,v*zoom)) for v in xedges]
