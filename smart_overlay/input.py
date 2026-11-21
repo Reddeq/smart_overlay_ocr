@@ -58,18 +58,30 @@ def open_project(path: str | Path) -> Project:
     if raster.size != (project.source.width, project.source.height):
         raise ValueError("Размер изображения в проекте не совпадает с метаданными")
     if project.source.mode == "PDF":
-        from .native_pdf import _clean_background
+        from .native_pdf import _clean_background, _pdf_lib, _render_png
         info = project.raw.get("native_pdf")
         if not isinstance(info, dict) or "page" not in info or "zoom" not in info:
             raise ValueError("PDF проект не содержит номера страницы и масштаба")
         try:
-            cleaned = _clean_background(raw, int(info["page"]), float(info["zoom"]))
-            with Image.open(io.BytesIO(cleaned)) as rendered:
+            if info.get("text_redacted_background", False):
+                # Backward compatibility: projects exported before original
+                # backgrounds were retained still contain a cleaned bitmap.
+                rendered_png = _clean_background(
+                    raw, int(info["page"]), float(info["zoom"]))
+            else:
+                fitz = _pdf_lib()
+                document = fitz.open(stream=raw, filetype="pdf")
+                try:
+                    rendered_png = _render_png(
+                        document[int(info["page"])-1],float(info["zoom"]))
+                finally:
+                    document.close()
+            with Image.open(io.BytesIO(rendered_png)) as rendered:
                 expected = rendered.convert("RGB")
                 if (expected.size != raster.size or
                         ImageChops.difference(expected, raster).getbbox()):
                     raise ValueError("Фон PDF проекта не соответствует исходнику")
-        except (ValueError, RuntimeError, OSError) as exc:
+        except (ValueError, RuntimeError, OSError, IndexError) as exc:
             raise ValueError("Не удалось проверить исходный PDF проекта") from exc
     else:
         with Image.open(io.BytesIO(raw)) as original:
