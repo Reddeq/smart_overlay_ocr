@@ -9,3 +9,4 @@ paddleocr[doc-parser]==3.3.2
 paddlex==3.3.13
 pandas==2.2.3
 
+PyMuPDF>=1.26.4,<2
