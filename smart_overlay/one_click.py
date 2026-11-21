@@ -167,8 +167,22 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
     output = available_pptx(source, destination)
     warnings: list[str] = []
     _cancelled(cancelled)
-    progress("Загрузка чертежа")
-    source_project = load_image(source)
+    engine = ocr_engine or ("native_pdf" if source.suffix.lower() == ".pdf"
+                             else settings.ocr_engine)
+    if engine not in ("smart", "vl_local", "hybrid_local", "cloud_full", "native_pdf"):
+        raise ValueError("Неизвестный движок OCR/конвертации")
+    if engine == "native_pdf":
+        if source.suffix.lower() != ".pdf":
+            raise ValueError("Режим цифровых чертежей работает с PDF; для PNG/JPEG выберите OCR")
+        from .native_pdf import native_pdf_project, PDF_ZOOM
+        progress("PDF: чтение исходного текста и векторной структуры")
+        source_project = native_pdf_project(source,pdf_page,zoom=PDF_ZOOM,
+                                            progress=progress)
+        # 2 source pixels per PDF point => 144px / physical inch.
+        settings.inches_per_pixel = 1 / (72 * PDF_ZOOM)
+    else:
+        progress("Загрузка чертежа")
+        source_project = load_image(source)
     short_side = min(source_project.source.width, source_project.source.height)
     long_side = max(source_project.source.width, source_project.source.height)
     smallest_scale, largest_scale = 1 / short_side, 56 / long_side
@@ -176,16 +190,17 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         raise ValueError("Слишком вытянутый чертёж для одного слайда PowerPoint")
     # Keep the exact aspect ratio and OCR pixel geometry even for high-DPI images.
     settings.inches_per_pixel = min(largest_scale, max(smallest_scale, settings.inches_per_pixel))
-    engine = ocr_engine or settings.ocr_engine
-    if engine not in ("smart", "vl_local", "hybrid_local", "cloud_full"):
-        raise ValueError("Неизвестный движок OCR")
     settings.ocr_engine = engine
     if vl_device is not None:
         if vl_device not in ("cpu", "gpu:0"):
             raise ValueError("PaddleOCR-VL: допустимы устройства cpu и gpu:0")
         settings.vl_device = vl_device
     grouping_requests = table_requests = 0
-    if engine == "cloud_full":
+    if engine == "native_pdf":
+        project = source_project
+        meta = project.raw.get("native_pdf", {})
+        warnings.extend(str(issue) for issue in meta.get("unresolved", []))
+    elif engine == "cloud_full":
         from .cloud_ocr import recognize_cloud
         if not consent:
             raise ValueError("Требуется явное согласие на отправку всего чертежа в облако")
@@ -259,8 +274,8 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         raise ValueError("Неизвестный движок OCR")
     _cancelled(cancelled)
 
-    if engine in ("vl_local", "hybrid_local", "cloud_full"):
-        pass  # Cloud-only already ran; never invoke legacy grouping or local checks.
+    if engine in ("vl_local", "hybrid_local", "cloud_full", "native_pdf"):
+        pass  # No secondary OCR/online analysis for source-native PDF mode.
     elif consent and api_key:
         progress("Подготовка безопасной VL-группировки")
         try:
@@ -278,9 +293,12 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         warnings.append("Использован локальный OCR; для смысловой группировки настройте OpenRouter")
 
     _cancelled(cancelled)
-    skipped = suppress_standalone_codes(project)
-    if skipped:
-        project.messages.append(f"Оставлено на оригинальном изображении обозначений: {skipped}")
+    if engine != "native_pdf":
+        skipped = suppress_standalone_codes(project)
+        if skipped:
+            project.messages.append(f"Оставлено на оригинальном изображении обозначений: {skipped}")
+    # PDF text removed from the raster must remain editable, including codes.
+    project.settings = settings.model_dump()
     validate_project(project)
     progress("Создание редактируемого PowerPoint")
     # The output isn't written if export fails. Export to a temporary filename
