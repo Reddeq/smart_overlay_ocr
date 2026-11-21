@@ -1,9 +1,11 @@
 """Born-digital (vector) PDF -> editable text/table overlays, without OCR.
 
 Use PDF text spans and ruled cell geometry, not inferred visual OCR.
-The displayed PDF background is rendered with *text removed* but all vector
-paths and images preserved, preventing duplicate text and opaque masks.
-Work is performed on an in-memory PDF; the original input is never modified.
+The displayed PDF background preserves the ENTIRE original page, including
+authentic PDF glyphs, vector paths and images. OCR-style editable objects
+can cover only original glyph footprints when visible. Source-exact mode
+keeps the full raster visually untouched with transparent editable objects.
+The original input is never modified.
 Currently one PDF page per PowerPoint slide/file.
 """
 from __future__ import annotations
@@ -529,7 +531,7 @@ def _pdf_text_objects(fragments, groups, table_ids, samples):
 
 
 def _clean_background(raw,page_number,zoom):
-    """Legacy-only PDF background cleanup, for preexisting saved projects.
+    """Legacy-only PDF background cleanup for already saved old projects.
 
     Transparent redaction avoids white boxes obliterating wires/table lines.
     The untouched original PDF bytes remain stored as the project's source.
