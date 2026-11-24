@@ -42,7 +42,9 @@ def test_cli_pdf_tables_override_only_when_explicit(flag, saved, expected, tmp_p
 @pytest.mark.parametrize("ignore_numbers", [True, False])
 @pytest.mark.parametrize("detect_tables", [True, False])
 @pytest.mark.parametrize("legacy_mode", ["ocr_style", "source_exact"])
-def test_new_conversion_keeps_native_editable_mode(ignore_numbers, detect_tables, legacy_mode, tmp_path, monkeypatch):
+@pytest.mark.parametrize("split_lines", [True, False])
+def test_new_conversion_keeps_native_editable_mode(ignore_numbers, detect_tables, legacy_mode, split_lines,
+                                                   tmp_path, monkeypatch):
     from smart_overlay.diagnose_vl import synthetic
     from smart_overlay.one_click import convert_drawing
     project, _ = synthetic()
@@ -58,8 +60,8 @@ def test_new_conversion_keeps_native_editable_mode(ignore_numbers, detect_tables
                         lambda project, path, *a, **kw: path.write_bytes(b"integration export double"))
     result = convert_drawing(tmp_path / "drawing.pdf", settings=Settings(
         native_pdf_overlay_mode=legacy_mode, native_pdf_detect_tables=detect_tables,
-        native_pdf_ignore_numbers=ignore_numbers))
-    assert calls == [{"detect_tables": detect_tables, "ignore_numbers": ignore_numbers}]
+        native_pdf_ignore_numbers=ignore_numbers, native_pdf_split_lines=split_lines))
+    assert calls == [{"detect_tables": detect_tables, "ignore_numbers": ignore_numbers, "split_lines": split_lines}]
     assert result.project.raw["native_pdf"]["overlay_mode"] == "editable"
     assert result.warnings == ["Source font must be installed"]
 
@@ -73,21 +75,17 @@ def test_gui_pdf_tables_toggle_persists_and_respects_busy(gui_app, monkeypatch):
     monkeypatch.setattr(quick_app, "save_settings", lambda value: saved.append(value.model_copy(deep=True)))
     window = quick_app.QuickWindow()
     try:
-        window.path = Path("drawing.pdf")
-        window.mode_combo.setCurrentIndex(window.mode_combo.findData("native_pdf"))
-        combo = window.pdf_tables_combo
-        assert combo.count() == 2
-        assert combo.currentData() is False
-        assert not combo.isHidden()
-        combo.setCurrentIndex(combo.findData(True))
+        checkbox = window.pdf_tables_checkbox
+        assert not checkbox.isChecked()
+        assert not checkbox.isHidden()
+        checkbox.click()
         assert saved[-1].native_pdf_detect_tables is True
         window.set_busy(True)
-        assert not combo.isEnabled()
+        assert not checkbox.isEnabled()
         window.set_busy(False)
-        assert combo.isEnabled()
-        window.path = Path("drawing.png")
-        window.mode_changed()
-        assert combo.isHidden()
+        assert checkbox.isEnabled()
+        checkbox.click()
+        assert saved[-1].native_pdf_detect_tables is False
     finally:
         window.close()
         window.deleteLater()
@@ -102,8 +100,9 @@ def test_gui_new_pdf_completion_describes_visible_editable_text(gui_app, project
     window = quick_app.QuickWindow()
     monkeypatch.setattr(window.preview, "show_project", lambda _: None)
     try:
-        window.done(SimpleNamespace(project=project, pptx=Path("drawing.pptx"),
-                                    needs_review=0, warnings=[]))
+        monkeypatch.setattr(quick_app, "open_project", lambda _: project)
+        group = SimpleNamespace(pptx=Path("drawing_01.pptx"), project_files=[Path("page-01.socr.json")])
+        window.done(SimpleNamespace(selected_pages=[1], groups=[group], warnings=[]))
         assert "видим" in window.summary.text().lower()
         assert "невидим" not in window.summary.text().lower()
     finally:

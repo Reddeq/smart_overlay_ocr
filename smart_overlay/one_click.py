@@ -180,9 +180,11 @@ def convert_drawing(source: str | Path, *, destination: str | Path | None = None
         source_project = native_pdf_project(source,pdf_page,zoom=PDF_ZOOM,
                                             detect_tables=settings.native_pdf_detect_tables,
                                             ignore_numbers=settings.native_pdf_ignore_numbers,
+                                            split_lines=settings.native_pdf_split_lines,
                                             progress=progress)
-        # 2 source pixels per PDF point => 144px / physical inch.
-        settings.inches_per_pixel = 1 / (72 * PDF_ZOOM)
+        # Large sheets may have been rendered below the requested density.
+        actual_zoom = source_project.raw.get("native_pdf", {}).get("zoom", PDF_ZOOM)
+        settings.inches_per_pixel = 1 / (72 * actual_zoom)
     else:
         progress("Загрузка чертежа")
         source_project = load_image(source)

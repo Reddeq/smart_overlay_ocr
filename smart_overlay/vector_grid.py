@@ -258,6 +258,59 @@ def _crossings(coordinate,start,stop,keys,index):
             if any(a-.8<=coordinate<=b+.8 for a,b in index[key])]
 
 
+class LabelRowIndex:
+    """Find row attachments without requiring the grid to become a PPTX table."""
+
+    def __init__(self, page, drawings):
+        self.horizontal, vertical = _strokes(page, drawings)
+        self.ys = [y for y, _, _ in self.horizontal]
+        self.vertical = _stroke_index(vertical)
+        self.xs = sorted(self.vertical)
+        levels = defaultdict(list)
+        # Use joined strokes for the closed grid, raw strokes for wire ends.
+        for y, start, stop in _joined_strokes(self.horizontal):
+            joins = _crossings(y, start, stop, self.xs, self.vertical)
+            for left, right in zip(joins, joins[1:]):
+                if right - left >= 8:
+                    levels[left, right].append(y)
+        self.bands = defaultdict(list)
+        for (left, right), values in levels.items():
+            rows = _cluster(values, tolerance=.8)
+            if len(rows) >= 3:
+                self.bands[left, 1].append((right, rows))
+                self.bands[right, -1].append((left, rows))
+
+    def attachments(self, bounds, font_size):
+        """Return (near edge, far edge, row) matches for one horizontal label."""
+        left, top, right, bottom = bounds
+        center = (top + bottom) / 2
+        y_tolerance = max(1., font_size * .23)
+        x_tolerance = max(2., font_size * .35)
+        first = bisect_left(self.ys, center - y_tolerance)
+        last = bisect_right(self.ys, center + y_tolerance)
+        matches = set()
+        for y, start, stop in self.horizontal[first:last]:
+            for side, near_text, near_grid in ((1, start, stop), (-1, stop, start)):
+                boundary = right if side == 1 else left
+                if abs(near_text - boundary) > x_tolerance:
+                    continue
+                for edge in _crossings(y, near_grid, near_grid, self.xs, self.vertical):
+                    if side * (edge - boundary) <= x_tolerance:
+                        continue
+                    for other, rows in self.bands.get((edge, side), ()):
+                        row = bisect_right(rows, y) - 1
+                        if not 0 <= row < len(rows) - 1:
+                            continue
+                        top_rule, bottom_rule = rows[row:row + 2]
+                        # A connector is inside a cell band, not a horizontal rule.
+                        if min(y - top_rule, bottom_rule - y) <= .8:
+                            continue
+                        if all(_union_coverage(self.vertical[x], top_rule, bottom_rule)
+                               >= .95 * (bottom_rule - top_rule) for x in (edge, other)):
+                            matches.add((edge, other, row))
+        return matches
+
+
 def _without_dense_fill(strokes,perpendicular):
     by_span=defaultdict(list)
     for stroke in strokes:

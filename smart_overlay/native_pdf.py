@@ -27,7 +27,7 @@ from .native_dedup import deduplicate_text
 from .native_numbers import is_numeric_label
 from .native_paragraphs import LIST_START, normalize_layout
 from .structure import validate_project
-from .vector_grid import GridCell, VectorGrid, discover_vector_grids
+from .vector_grid import GridCell, LabelRowIndex, VectorGrid, discover_vector_grids
 
 PDF_ZOOM = 2.0
 MAX_PDF_BYTES = 64 * 1024 * 1024
@@ -75,7 +75,7 @@ def _read_pdf(path):
     return raw, document
 
 
-def _page(document, number, zoom):
+def _page(document, number):
     if not 1 <= number <= len(document):
         raise NativePDFError(f"Страница {number} отсутствует (всего {len(document)})")
     page = document[number-1]
@@ -83,17 +83,42 @@ def _page(document, number, zoom):
         raise NativePDFError(
             "Пока не поддерживается PDF с Rotate=90/180/270; "
             "перед конвертацией нормализуйте поворот страницы.")
-    if page.rect.width * zoom * page.rect.height * zoom > MAX_PREVIEW_PIXELS:
-        raise NativePDFError("Страница слишком велика для безопасного рендеринга")
     return page
+
+
+def pdf_raster_size(width, height, zoom):
+    """Use MuPDF's integer pixel bounds, including fractional page dimensions."""
+    fitz = _pdf_lib()
+    rect = (fitz.Rect(0, 0, width, height) * fitz.Matrix(zoom, zoom)).irect
+    return rect.width, rect.height
+
+
+def pdf_render_zoom(width, height, zoom=PDF_ZOOM):
+    """Keep the requested zoom for normal sheets; fit large sheets to the pixel budget."""
+    if not all(math.isfinite(v) and v > 0 for v in (width, height, zoom)):
+        raise NativePDFError("Некорректные размеры или масштаб страницы PDF")
+    # Start with the continuous area limit, then account for integer pixel bounds.
+    zoom = min(zoom, math.sqrt(MAX_PREVIEW_PIXELS / width / height))
+    low, high = 0.0, zoom
+    if math.prod(pdf_raster_size(width, height, zoom)) > MAX_PREVIEW_PIXELS:
+        for _ in range(24):
+            mid = (low + high) / 2
+            if math.prod(pdf_raster_size(width, height, mid)) <= MAX_PREVIEW_PIXELS:
+                low = mid
+            else:
+                high = mid
+        zoom = low
+    if min(pdf_raster_size(width, height, zoom)) < 1:
+        raise NativePDFError("Страница слишком вытянута для безопасного рендеринга")
+    return zoom
 
 
 def pdf_info(path):
     raw, doc = _read_pdf(path)
     try:
         return {"pages": len(doc), "page_sizes": [
-            [round(doc[i].rect.width, 2),round(doc[i].rect.height,2)]
-            for i in range(len(doc))]}
+            [page.rect.width, page.rect.height]
+            for page in doc]}
     finally:
         doc.close()
 
@@ -129,7 +154,8 @@ def preview_pdf(path, page_number=1, *, zoom=PDF_ZOOM):
     """Preview actual PDF page (with text); extraction is deferred to conversion."""
     raw,document=_read_pdf(path)
     try:
-        page=_page(document,page_number,zoom)
+        page=_page(document,page_number)
+        zoom=pdf_render_zoom(page.rect.width,page.rect.height,zoom)
         source=_make_source(raw,path,_render_png(page,zoom),page,zoom)
         project=Project(source=source)
         project.raw["native_pdf_preview"]={
@@ -784,12 +810,41 @@ def _separate_logical_blocks(lines, samples, separators=(), zoom=PDF_ZOOM):
     return buckets
 
 
-def _pdf_text_objects(fragments, groups, table_ids, samples, zoom=PDF_ZOOM, separators=()):
+def _split_wired_labels(members, row_index, samples, zoom):
+    if len(members) < 2 or abs(members[0].rotation) > 1:
+        yield members
+        return
+    matches = [row_index.attachments(
+        (f.bbox.x / zoom, f.bbox.y / zoom, f.bbox.right / zoom, f.bbox.bottom / zoom),
+        float(samples[f.id]['size'])) for f in members]
+    separate = set()
+    for i, (before, after) in enumerate(zip(matches, matches[1:])):
+        if any((edge, other, row + 1) in after for edge, other, row in before):
+            separate.update((i, i + 1))
+    start = 0
+    for i in sorted(separate):
+        if start < i:
+            yield members[start:i]
+        yield members[i:i+1]
+        start = i + 1
+    if start < len(members):
+        yield members[start:]
+
+
+def _pdf_text_objects(fragments, groups, table_ids, samples, zoom=PDF_ZOOM, separators=(),
+                      *, split_lines=False, row_index=None):
     by_id={f.id:f for f in fragments}
     objects=[]
     # PDF producers can split one paragraph into several independent blocks.
     free=[by_id[i] for ids in groups.values() for i in ids if i not in table_ids]
-    for members in _separate_logical_blocks(free,samples,separators,zoom):
+    if split_lines:
+        blocks = ([line] for line in free)
+    else:
+        blocks = _separate_logical_blocks(free, samples, separators, zoom)
+        if row_index is not None:
+            blocks = (block for members in blocks
+                      for block in _split_wired_labels(members, row_index, samples, zoom))
+    for members in blocks:
         x0=min(f.bbox.x for f in members)
         y0=min(f.bbox.y for f in members)
         x1=max(f.bbox.right for f in members)
@@ -838,11 +893,12 @@ def _clean_background(raw,page_number,zoom):
 
 
 def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,detect_tables=True,
-                       ignore_numbers=False,progress=lambda _:None):
+                       ignore_numbers=False,split_lines=False,progress=lambda _:None):
     """Single born-digital PDF page to validated editable text/table project."""
     raw,doc=_read_pdf(path)
     try:
-        page=_page(doc,page_number,zoom)
+        page=_page(doc,page_number)
+        zoom=pdf_render_zoom(page.rect.width,page.rect.height,zoom)
         progress("PDF: извлечение текстовых блоков")
         # PNG dimensions use PyMuPDF's pixel rounding convention.
         original_png=_render_png(page,zoom)
@@ -866,7 +922,9 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,detect_tables=True,
         separators=[(tuple(item[1]),tuple(item[2])) for path in drawings
                     if path.get("type") in ("s","fs") for item in path.get("items",[])
                     if item[0]=="l" and abs(item[1]-item[2])>10]
-        texts=_pdf_text_objects(fragments,groups,table_ids,samples,zoom,separators)
+        row_index = None if split_lines else LabelRowIndex(page, drawings)
+        texts=_pdf_text_objects(fragments,groups,table_ids,samples,zoom,separators,
+                                split_lines=split_lines,row_index=row_index)
         extracted_lines=len(fragments)
         for obj in [*texts, *(cell for table in tables for cell in table.cells)]:
             if obj.native_layout is not None:
@@ -912,6 +970,7 @@ def native_pdf_project(path,page_number=1,*,zoom=PDF_ZOOM,detect_tables=True,
             "overlay_mode":"editable",
             "detect_tables":detect_tables,
             "ignore_numbers":ignore_numbers,
+            "split_lines":split_lines,
             "deduplication":deduplication,
             "unresolved":skipped+table_warnings,
         }

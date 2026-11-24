@@ -141,23 +141,6 @@ def test_representative_sample_includes_bottom_of_page():
     assert max(picks) >= 25
 
 
-def test_language_chooser_presets_and_auto_default(gui_app, monkeypatch, tmp_path):
-    from smart_overlay.quick_app import LanguageDialog, QuickWindow
-    monkeypatch.setattr("smart_overlay.quick_app.load_settings", Settings)
-    monkeypatch.setattr("smart_overlay.quick_app.data_dir", lambda: tmp_path)
-    window = QuickWindow()
-    dialog = LanguageDialog("auto", [], window)
-    try:
-        assert window.settings.ocr_language_mode == "auto"
-        assert "Авто" in window.language_button.text()
-        dialog.use_preset(["ch", "en"])
-        assert dialog.selected() == ("manual", ["en", "ch"])
-    finally:
-        dialog.close()
-        window.close()
-        dialog.deleteLater()
-        window.deleteLater()
-
 
 def test_unread_primary_detection_can_be_recovered_by_secondary():
     from smart_overlay.ocr import additional_detected_lines

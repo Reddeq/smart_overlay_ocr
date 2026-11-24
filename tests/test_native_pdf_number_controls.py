@@ -59,15 +59,11 @@ def test_gui_ignore_numbers_persistence_and_availability(gui_app, monkeypatch, s
         checkbox = window.pdf_ignore_numbers_checkbox
         assert checkbox.text() == "Игнорировать числа"
         assert checkbox.isChecked() is saved_value
-        assert checkbox.isHidden()
-        assert not checkbox.isEnabled()
-        window.path = Path("drawing.pdf")
-        window.mode_combo.setCurrentIndex(window.mode_combo.findData("native_pdf"))
         assert not checkbox.isHidden()
         assert checkbox.isEnabled()
         tooltip = checkbox.toolTip()
         assert "PNG" in tooltip
-        assert "отдельные" in tooltip
+        assert "отдельные" in tooltip.lower()
         assert "таблиц" in tooltip
         checkbox.setChecked(not saved_value)
         assert saved[-1].native_pdf_ignore_numbers is (not saved_value)
@@ -75,18 +71,7 @@ def test_gui_ignore_numbers_persistence_and_availability(gui_app, monkeypatch, s
         assert not checkbox.isEnabled()
         window.set_busy(False)
         assert checkbox.isEnabled()
-        window.path = Path("drawing.png")
-        window.mode_changed()
-        assert checkbox.isHidden()
-        assert not checkbox.isEnabled()
-        window.set_busy(True)
-        window.set_busy(False)
-        assert not checkbox.isEnabled()
-        window.path = Path("drawing.pdf")
-        window.mode_combo.setCurrentIndex(window.mode_combo.findData("smart"))
-        assert checkbox.isHidden()
-        assert not checkbox.isEnabled()
-        assert window.pdf_tables_combo.isEnabled() == checkbox.isEnabled()
+        assert window.pdf_tables_checkbox.isEnabled() == checkbox.isEnabled()
     finally:
         window.close()
         window.deleteLater()

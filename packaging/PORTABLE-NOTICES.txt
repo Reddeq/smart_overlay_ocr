@@ -1,0 +1,12 @@
+Smart Overlay OCR — Windows x64 portable build
+
+Extract the entire ZIP, then launch SmartOverlayOCR.exe. Keep _internal beside
+it. Python and Node do not need to be installed. The launcher uses Windows
+.NET Framework 4.x. This build does not bundle OCR engines or model weights.
+Application settings remain in the normal per-user application data location.
+
+Bundled third-party notices are in _internal/python/LICENSE.txt,
+_internal/python/packages (distribution metadata and license files),
+_internal/node/LICENSE.txt, and _internal/node_modules (package notices).
+PyMuPDF is offered under AGPL or commercial terms. This bundle does not grant
+or attest to any commercial license; check redistribution obligations first.

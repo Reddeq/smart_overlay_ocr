@@ -152,19 +152,3 @@ def test_failed_vl_still_exports_original_ocr_pptx(monkeypatch,tmp_path):
     assert converted.pptx.read_bytes()==b"pptx fixture"
     assert exported[0].objects[0].text=="MAlN"
     assert any("сохранён обычный OCR" in x for x in converted.warnings)
-
-
-def test_hybrid_gui_option_available(gui_app,monkeypatch,tmp_path):
-    from smart_overlay.quick_app import QuickWindow
-    monkeypatch.setattr("smart_overlay.quick_app.load_settings",Settings)
-    monkeypatch.setattr("smart_overlay.quick_app.data_dir",lambda:tmp_path)
-    app=QuickWindow()
-    try:
-        index=app.mode_combo.findData("hybrid_local")
-        assert index>=0
-        app.mode_combo.setCurrentIndex(index)
-        assert app.settings.ocr_engine=="hybrid_local"
-        assert app.language_button.isEnabled()
-    finally:
-        app.close()
-        app.deleteLater()

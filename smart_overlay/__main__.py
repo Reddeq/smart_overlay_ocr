@@ -34,6 +34,8 @@ def main():
     one.add_argument("--pdf-ignore-numbers", action=argparse.BooleanOptionalAction, default=None,
                      help="Native PDF only: ignore standalone numeric labels (PNG-only); "
                           "table cells always keep all numbers (default: saved setting, otherwise disabled)")
+    one.add_argument("--pdf-split-lines", action=argparse.BooleanOptionalAction, default=None,
+                     help="Native PDF only: one frame per text line outside reconstructed tables")
     one.add_argument("--settings", type=Path)
     one.add_argument("--languages", help="Comma-separated manual OCR languages, e.g. ru,en or ch,ru")
     one.add_argument("--smart", action="store_true", help="Use optional windowed OpenRouter analysis")
@@ -163,6 +165,7 @@ def main():
                 "ocr_languages": codes})
         overrides = {"native_pdf_detect_tables": args.pdf_tables,
                      "native_pdf_ignore_numbers": args.pdf_ignore_numbers,
+                     "native_pdf_split_lines": args.pdf_split_lines,
                      "vl_tile_size": args.vl_tile_size,
                      "vl_tile_timeout_seconds": args.vl_tile_timeout,
                      "vl_max_new_tokens": args.vl_max_new_tokens,

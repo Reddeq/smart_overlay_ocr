@@ -174,23 +174,6 @@ def test_model_failure_never_creates_empty_pptx(drawing, monkeypatch, tmp_path):
     assert not path.with_suffix(".pptx").exists()
 
 
-def test_quick_ui_has_independent_local_vl_switch(gui_app, monkeypatch, tmp_path):
-    from smart_overlay.quick_app import QuickWindow
-    monkeypatch.setattr("smart_overlay.quick_app.data_dir", lambda: tmp_path)
-    monkeypatch.setattr("smart_overlay.quick_app.load_settings", Settings)
-    window = QuickWindow()
-    try:
-        window.mode_combo.setCurrentIndex(window.mode_combo.findData("vl_local"))
-        assert window.mode_combo.currentData() == "vl_local"
-        assert window.settings.ocr_engine == "vl_local"
-        assert not window.language_button.isEnabled()
-        assert window.device_combo.isVisible() == window.isVisible()  # hidden window in offscreen test
-        window.mode_combo.setCurrentIndex(0)
-        assert window.settings.ocr_engine == "smart"
-    finally:
-        window.close()
-        window.deleteLater()
-
 
 def test_image_only_vl_failure_saves_raw_output_and_layout(drawing, tmp_path):
     """Real drawings classified as one 'image' must not erase the raster."""

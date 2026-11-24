@@ -9,7 +9,7 @@ from typing import Callable
 
 from . import export
 from .input import open_project, save_project
-from .native_pdf import PDF_ZOOM, native_pdf_project, pdf_info
+from .native_pdf import native_pdf_project, pdf_info, pdf_raster_size, pdf_render_zoom
 from .one_click import ProcessingCancelled
 from .pdf_pages import format_pdf_pages, parse_pdf_pages
 from .settings import Settings, data_dir
@@ -86,16 +86,17 @@ def convert_pdf_pages(source, *, pages='', destination=None, settings=None,
             paths = []
             warnings = []
             review = 0
-            # One common scale for the group; use raster-rounded dimensions so
+            # One raster density and slide scale for the group; use actual pixel bounds so
             # every slide dimension remains within PowerPoint's 1..56in bounds.
-            sizes = [(math.ceil(info['page_sizes'][p-1][0] * PDF_ZOOM),
-                      math.ceil(info['page_sizes'][p-1][1] * PDF_ZOOM)) for p in members]
+            page_sizes = [info['page_sizes'][p - 1] for p in members]
+            zoom = min(pdf_render_zoom(*size) for size in page_sizes)
+            sizes = [pdf_raster_size(width, height, zoom) for width, height in page_sizes]
             lower = max(1/min(size) for size in sizes)
             upper = min(56/max(size) for size in sizes)
             if lower > upper:
                 raise ValueError('No common PowerPoint scale for PDF group')
             group_settings = settings.model_copy(deep=True)
-            group_settings.inches_per_pixel = min(upper, max(lower, 1/(72*PDF_ZOOM)))
+            group_settings.inches_per_pixel = min(upper, max(lower, 1/(72*zoom)))
             for page in members:
                 check()
                 progress(f'PDF: page {page}/{info["pages"]}')
@@ -103,8 +104,9 @@ def convert_pdf_pages(source, *, pages='', destination=None, settings=None,
                     progress(f'PDF: page {page}/{info["pages"]}: {message}')
                 try:
                     project = native_pdf_project(
-                        source, page, detect_tables=settings.native_pdf_detect_tables,
-                        ignore_numbers=settings.native_pdf_ignore_numbers, progress=page_progress)
+                        source, page, zoom=zoom, detect_tables=settings.native_pdf_detect_tables,
+                        ignore_numbers=settings.native_pdf_ignore_numbers,
+                        split_lines=settings.native_pdf_split_lines, progress=page_progress)
                 except (ValueError,OSError) as exc:
                     raise ValueError(f'Страница {page}: {exc}') from exc
                 check()

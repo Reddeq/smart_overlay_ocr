@@ -21,7 +21,6 @@ def window(gui_app, monkeypatch):
 
 def test_selection_is_separate_from_preview_and_busy_scoped(window):
     window.path = Path('drawing.pdf')
-    window.mode_combo.setCurrentIndex(window.mode_combo.findData('native_pdf'))
     assert window.pdf_pages_input.text() == ''
     assert '1, 2, 6-9' in window.pdf_pages_input.placeholderText()
     assert window.pdf_pages_label.text()
@@ -35,14 +34,13 @@ def test_selection_is_separate_from_preview_and_busy_scoped(window):
     window.set_busy(False)
     assert window.pdf_pages_input.isEnabled()
     window.path = Path('drawing.png')
-    window.mode_changed()
+    window.set_busy(False)
     assert not window.pdf_pages_input.isEnabled()
 
 
 def test_gui_invalid_selection_never_starts_worker(window, monkeypatch):
     from smart_overlay import quick_app
     window.path = Path('drawing.pdf')
-    window.mode_combo.setCurrentIndex(window.mode_combo.findData('native_pdf'))
     window.pdf_page.setRange(1, 3)
     window.pdf_pages_input.setText('3-1')
     warnings = []
@@ -124,17 +122,16 @@ def test_cli_default_stays_single_page(monkeypatch):
 def test_gui_worker_routes_selection_not_preview_locally(window, monkeypatch, selection):
     from smart_overlay import quick_app, pdf_batch
     window.path = Path('drawing.pdf')
-    window.mode_combo.setCurrentIndex(window.mode_combo.findData('native_pdf'))
     window.pdf_page.blockSignals(True)
     window.pdf_page.setRange(1, 4)
     window.pdf_page.setValue(4)
     window.pdf_pages_input.setText(selection)
-    window.pdf_tables_combo.setCurrentIndex(window.pdf_tables_combo.findData(False))
+    window.pdf_tables_checkbox.setChecked(False)
     window.pdf_ignore_numbers_checkbox.setChecked(True)
-    window.cloud_enabled = True
+    window.settings.ocr_engine = 'cloud_full'  # Settings from a previous release.
     calls = []
     monkeypatch.setattr(pdf_batch, 'convert_pdf_pages', lambda source, **kw: calls.append((source, kw)))
-    monkeypatch.setattr(quick_app, 'convert_drawing', lambda *a, **k: pytest.fail('OCR route'))
+    monkeypatch.setattr('smart_overlay.one_click.convert_drawing', lambda *a, **k: pytest.fail('OCR route'))
     monkeypatch.setattr(quick_app.ConvertWorker, 'start', lambda _: None)
     window.recognize()
     assert window.worker is not None
@@ -155,8 +152,9 @@ def test_gui_worker_routes_selection_not_preview_locally(window, monkeypatch, se
 def test_gui_new_input_resets_selection(window, project, monkeypatch):
     from smart_overlay import quick_app
     window.pdf_pages_input.setText('2-3')
-    monkeypatch.setattr(quick_app.QFileDialog, 'getOpenFileName', lambda *a: ('drawing.png', ''))
-    monkeypatch.setattr(quick_app, 'load_image', lambda _: project)
+    monkeypatch.setattr(quick_app.QFileDialog, 'getOpenFileName', lambda *a: ('drawing.pdf', ''))
+    monkeypatch.setattr(quick_app, 'pdf_info', lambda _: {'pages': 3})
+    monkeypatch.setattr(quick_app, 'preview_pdf', lambda *_: project)
     window.choose()
     assert window.pdf_pages_input.text() == ''
 
@@ -178,7 +176,7 @@ def test_page_selection_field_is_wide_enough_for_real_input(window, gui_app):
     if font.exists():
         QFontDatabase.addApplicationFont(str(font))
     window.path=Path('drawing.pdf')
-    window.mode_combo.setCurrentIndex(window.mode_combo.findData('native_pdf'))
+    window.set_busy(False)
     window.show()
     gui_app.processEvents()
     assert window.pdf_pages_input.width()>=200

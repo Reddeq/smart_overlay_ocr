@@ -15,6 +15,7 @@ class Settings(Model):
     native_pdf_overlay_mode: Literal["editable", "ocr_style", "source_exact"] = "editable"
     native_pdf_detect_tables: bool = True
     native_pdf_ignore_numbers: bool = False
+    native_pdf_split_lines: bool = False
     vl_device: Literal["cpu", "gpu:0"] = "cpu"
     hybrid_max_checks: int = Field(default=3, ge=0, le=30)
     hybrid_confidence: float = Field(default=0.74, ge=0, le=1)

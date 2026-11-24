@@ -757,9 +757,10 @@ class TableReviewResultDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, native_only=False):
         super().__init__()
-        self.setWindowTitle("Smart Overlay OCR · MVP 0.1")
+        self.native_only = native_only
+        self.setWindowTitle("Smart Overlay · Редактор чертежа" if native_only else "Smart Overlay OCR · MVP 0.1")
         self.resize(1320, 850)
         self.project = None
         self.project_path = None
@@ -771,7 +772,7 @@ class MainWindow(QMainWindow):
         self.pending_table_review_result = None
         self.active_grouping = False
         self.grouping_undo = None
-        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.api_key = "" if native_only else os.environ.get("OPENROUTER_API_KEY", "")
         # The offscreen Qt platform has no system font database on Windows.
         # Loading the installed UI font also makes headless visual QA meaningful.
         if not QFontDatabase.families():
@@ -788,45 +789,50 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         self.actions = []
-        for title, callback in [("Открыть изображение", self.open_image), ("Открыть проект", self.open_saved),
-                                ("Сохранить проект", self.save), ("Настройки", self.configure)]:
+        commands = [("Сохранить проект", self.save)]
+        if not native_only:
+            commands = [("Открыть изображение", self.open_image), ("Открыть проект", self.open_saved),
+                        *commands, ("Настройки", self.configure)]
+        for title, callback in commands:
             action = QAction(title, self)
             action.triggered.connect(callback)
             toolbar.addAction(action)
             self.actions.append(action)
-        self.mode = QComboBox()
-        self.mode.addItems(["Smart OCR", "OCR Only"])
-        toolbar.addWidget(self.mode)
-        self.recognize_button = QPushButton("Распознать")
-        self.recognize_button.clicked.connect(self.recognize)
-        toolbar.addWidget(self.recognize_button)
-        self.smart_button = QPushButton("VL для текущего OCR")
-        self.smart_button.clicked.connect(self.run_smart)
-        toolbar.addWidget(self.smart_button)
-        self.cancel_button = QPushButton("Отменить Smart OCR")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_smart)
-        toolbar.addWidget(self.cancel_button)
+        if not native_only:
+            self.mode = QComboBox()
+            self.mode.addItems(["Smart OCR", "OCR Only"])
+            toolbar.addWidget(self.mode)
+            self.recognize_button = QPushButton("Распознать")
+            self.recognize_button.clicked.connect(self.recognize)
+            toolbar.addWidget(self.recognize_button)
+            self.smart_button = QPushButton("VL для текущего OCR")
+            self.smart_button.clicked.connect(self.run_smart)
+            toolbar.addWidget(self.smart_button)
+            self.cancel_button = QPushButton("Отменить Smart OCR")
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.clicked.connect(self.cancel_smart)
+            toolbar.addWidget(self.cancel_button)
         self.export_button = QPushButton("Экспорт в PPTX")
         self.export_button.clicked.connect(self.export)
         toolbar.addWidget(self.export_button)
-        self.addToolBarBreak()
-        grouping_toolbar = QToolBar("Экспериментальная группировка")
-        grouping_toolbar.setMovable(False)
-        self.addToolBar(grouping_toolbar)
-        self.grouping_button = QPushButton("VL-группировка · эксперимент")
-        self.grouping_button.clicked.connect(self.run_grouping)
-        grouping_toolbar.addWidget(self.grouping_button)
-        self.find_tables_button = QPushButton('Найти таблицы')
-        self.find_tables_button.clicked.connect(self.find_tables)
-        grouping_toolbar.addWidget(self.find_tables_button)
-        self.table_review_button=QPushButton('VL-проверка таблиц')
-        self.table_review_button.clicked.connect(self.review_tables)
-        grouping_toolbar.addWidget(self.table_review_button)
-        self.undo_grouping_button = QPushButton("Отменить применение")
-        self.undo_grouping_button.setEnabled(False)
-        self.undo_grouping_button.clicked.connect(self.undo_grouping)
-        grouping_toolbar.addWidget(self.undo_grouping_button)
+        if not native_only:
+            self.addToolBarBreak()
+            grouping_toolbar = QToolBar("Экспериментальная группировка")
+            grouping_toolbar.setMovable(False)
+            self.addToolBar(grouping_toolbar)
+            self.grouping_button = QPushButton("VL-группировка · эксперимент")
+            self.grouping_button.clicked.connect(self.run_grouping)
+            grouping_toolbar.addWidget(self.grouping_button)
+            self.find_tables_button = QPushButton('Найти таблицы')
+            self.find_tables_button.clicked.connect(self.find_tables)
+            grouping_toolbar.addWidget(self.find_tables_button)
+            self.table_review_button = QPushButton('VL-проверка таблиц')
+            self.table_review_button.clicked.connect(self.review_tables)
+            grouping_toolbar.addWidget(self.table_review_button)
+            self.undo_grouping_button = QPushButton("Отменить применение")
+            self.undo_grouping_button.setEnabled(False)
+            self.undo_grouping_button.clicked.connect(self.undo_grouping)
+            grouping_toolbar.addWidget(self.undo_grouping_button)
         splitter = QSplitter()
         self.setCentralWidget(splitter)
         left = QWidget()
@@ -842,8 +848,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.objects)
         for title, fn in [("Добавить текст (область)", self.add_region),
                           ("Объединить блоки", self.merge), ("Разделить блок", self.split),
-                          ("Таблица ↔ текст", self.convert), ("Повторное OCR области", self.reocr)]:
+                          ("Таблица ↔ текст", self.convert)]:
             button(title, fn, layout)
+        if not native_only:
+            button("Повторное OCR области", self.reocr, layout)
         splitter.addWidget(left)
         self.preview = Preview()
         self.formatting_preview = QCheckBox("Оформление (приблизительно)")
@@ -892,10 +900,12 @@ class MainWindow(QMainWindow):
         props.addWidget(self.journal)
         splitter.addWidget(right)
         splitter.setSizes([230, 760, 320])
-        self.statusBar().showMessage("Откройте изображение или сохранённый проект. Колесо — масштаб; перетаскивание — перемещение вида.")
+        self.statusBar().showMessage(
+            "Колесо — масштаб; перетаскивание — перемещение вида." if native_only else
+            "Откройте изображение или сохранённый проект. Колесо — масштаб; перетаскивание — перемещение вида.")
 
     def error(self, text):
-        QMessageBox.warning(self, "Smart Overlay OCR", str(text))
+        QMessageBox.warning(self, "Smart Overlay", str(text))
 
     def selected_ids(self):
         return [item.data(Qt.ItemDataRole.UserRole) for item in self.objects.selectedItems()]
@@ -968,19 +978,23 @@ class MainWindow(QMainWindow):
             self.undo_grouping_button.setEnabled(False)
 
     def set_busy(self, busy):
-        for widget in [self.centralWidget(), self.recognize_button, self.smart_button, self.export_button, self.mode,
-                       self.grouping_button, self.find_tables_button, self.table_review_button]:
+        widgets = [self.centralWidget(), self.export_button]
+        if not self.native_only:
+            widgets.extend([self.recognize_button, self.smart_button, self.mode,
+                            self.grouping_button, self.find_tables_button, self.table_review_button])
+            self.undo_grouping_button.setEnabled(not busy and self.grouping_undo is not None)
+        for widget in widgets:
             widget.setEnabled(not busy)
         for action in self.actions:
             action.setEnabled(not busy)
-        self.undo_grouping_button.setEnabled(not busy and self.grouping_undo is not None)
 
     def start(self, operation, *, cancellable=False):
         if self.worker:
             return
         self.set_busy(True)
         self.worker = Worker(operation, self.api_key, self)
-        self.cancel_button.setEnabled(cancellable)
+        if not self.native_only:
+            self.cancel_button.setEnabled(cancellable)
         self.worker.progress.connect(self.statusBar().showMessage)
         self.worker.result.connect(self.received)
         self.worker.failed.connect(self.worker_error)
@@ -1010,8 +1024,9 @@ class MainWindow(QMainWindow):
     def worker_finished(self):
         worker = self.worker
         self.worker = None
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.setText("Отменить Smart OCR")
+        if not self.native_only:
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setText("Отменить Smart OCR")
         self.set_busy(False)
         worker.deleteLater()
         self.active_grouping = False

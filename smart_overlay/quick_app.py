@@ -1,28 +1,22 @@
-"""Minimal Windows UI: choose a drawing, recognize, receive an editable PPTX.
-
-The legacy object editor is kept as an optional correction tool, not the default
-workflow. Advanced experiments and diagnostics remain CLI-only.
-"""
-import os
-import json
+"""Desktop workflow for converting born-digital PDF drawings to PowerPoint."""
 import re
-from uuid import uuid4
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QFontDatabase
+from PySide6.QtCore import QSignalBlocker, QThread, Signal, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget, QGridLayout, QRadioButton,
-    QSpinBox,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
-from .app import Preview
-from .input import load_image, open_project
-from .languages import LANGUAGES
-from .one_click import OneClickResult, ProcessingCancelled, convert_drawing
-from .settings import data_dir, load_settings, save_settings
+from .app import MainWindow, Preview
+from .input import open_project
+from .native_pdf import NativePDFError, pdf_info, preview_pdf
+from .one_click import OneClickResult, ProcessingCancelled
+from .pdf_batch import PdfBatchResult
+from .pdf_pages import parse_pdf_pages
+from .settings import Settings, load_settings, save_settings
 
 
 class ConvertWorker(QThread):
@@ -41,158 +35,23 @@ class ConvertWorker(QThread):
         except ProcessingCancelled:
             self.stopped.emit()
         except Exception as exc:
-            # GUI boundary: never echo potentially sensitive network response bodies.
-            self.failed.emit(type(exc).__name__ + ": " + str(exc)[:500])
-
-
-class ConnectionDialog(QDialog):
-    def __init__(self, settings, key, proxy, enabled, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Настройки распознавания")
-        self.resize(520, 200)
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.cloud = QCheckBox("Для обычного Smart OCR разрешить облачную группировку")
-        self.cloud.setChecked(enabled)
-        form.addRow("", self.cloud)
-        self.key = QLineEdit(key)
-        self.key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key.setPlaceholderText("sk-or-… (не сохраняется на диск)")
-        form.addRow("API-ключ OpenRouter", self.key)
-        self.cloud_model = QLineEdit(settings.cloud_ocr_model)
-        self.cloud_model.setPlaceholderText("google/gemini-2.5-pro")
-        self.cloud_model.setToolTip("Модель, которой будет отправлен весь чертёж в режиме облачного OCR")
-        form.addRow("Модель полного облачного OCR", self.cloud_model)
-        self.proxy = QLineEdit(proxy)
-        self.proxy.setPlaceholderText("http://127.0.0.1:10809")
-        form.addRow("Прокси Xray", self.proxy)
-        layout.addLayout(form)
-        notice = QLabel("Режим «Облако · весь чертёж» отправляет исходные изображения в OpenRouter и может тарифицироваться. Для него потребуется подтверждение каждого запуска. Локальные режимы не передают изображение без отдельного согласия.")
-        notice.setWordWrap(True)
-        layout.addWidget(notice)
-        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        controls.accepted.connect(self.accept)
-        controls.rejected.connect(self.reject)
-        layout.addWidget(controls)
-
-    def accept(self):
-        if (self.cloud.isChecked() or self.parent() and
-                getattr(self.parent(), "mode_combo", None) and
-                self.parent().mode_combo.currentData() == "cloud_full") and not self.key.text().strip():
-            QMessageBox.warning(self, "OpenRouter", "Для облачного распознавания укажите API-ключ или отключите облачный режим.")
-            return
-        super().accept()
-
-
-class LanguageDialog(QDialog):
-    """One compact chooser for automatic routing, presets and manual combinations."""
-
-    PRESETS = [
-        ("Русский + английский", ["ru", "en"]),
-        ("Китайский + английский", ["ch", "en"]),
-        ("Японский + английский", ["japan", "en"]),
-        ("Китайский + русский", ["ch", "ru"]),
-    ]
-
-    def __init__(self, mode, languages, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Языки распознавания")
-        self.setMinimumWidth(540)
-        layout = QVBoxLayout(self)
-        self.auto = QRadioButton("Определять автоматически")
-        self.manual = QRadioButton("Указать языки")
-        self.auto.setChecked(mode != "manual")
-        self.manual.setChecked(mode == "manual")
-        layout.addWidget(self.auto)
-        layout.addWidget(self.manual)
-
-        preset_grid = QGridLayout()
-        for index, (title, codes) in enumerate(self.PRESETS):
-            button = QPushButton(title)
-            button.clicked.connect(lambda checked=False, choice=codes: self.use_preset(choice))
-            preset_grid.addWidget(button, index // 2, index % 2)
-        layout.addLayout(preset_grid)
-
-        self.checks = {}
-        grid = QGridLayout()
-        for i, (code, (title, _)) in enumerate(LANGUAGES.items()):
-            check = QCheckBox(title)
-            check.setChecked(code in languages)
-            check.toggled.connect(self.on_check)
-            self.checks[code] = check
-            grid.addWidget(check, i // 3, i % 3)
-        layout.addLayout(grid)
-        self.hint = QLabel("Автоопределение проверяет несколько письменностей и может работать дольше.")
-        self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
-        self.auto.toggled.connect(self.sync)
-        self.manual.toggled.connect(self.sync)
-        self.sync()
-
-        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        actions.accepted.connect(self.accept)
-        actions.rejected.connect(self.reject)
-        layout.addWidget(actions)
-
-    def on_check(self):
-        if self.sender().isChecked():
-            self.manual.setChecked(True)
-
-    def use_preset(self, codes):
-        for code, check in self.checks.items():
-            check.blockSignals(True)
-            check.setChecked(code in codes)
-            check.blockSignals(False)
-        self.manual.setChecked(True)
-        self.sync()
-
-    def sync(self):
-        manual = self.manual.isChecked()
-        for check in self.checks.values():
-            check.setEnabled(manual)
-        self.hint.setText(
-            "Ручной набор: будут использованы только указанные семейства OCR-моделей."
-            if manual else "Авто: китайский/японский, английский, кириллица, корейский и арабский. "
-            "Неизвестные письменности могут потребовать ручного выбора.")
-
-    def selected(self):
-        return ("manual" if self.manual.isChecked() else "auto",
-                [code for code, check in self.checks.items() if check.isChecked()])
-
-    def accept(self):
-        mode, selected = self.selected()
-        if mode == "manual" and not selected:
-            QMessageBox.warning(self, "Языки OCR", "Выберите хотя бы один язык.")
-            return
-        super().accept()
+            self.failed.emit(f"{type(exc).__name__}: {str(exc)[:500]}")
 
 
 class QuickWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Smart Overlay OCR")
+        self.setWindowTitle("Smart Overlay · Живые чертежи")
         self.resize(1100, 760)
-        self.settings = load_settings()
-        config = data_dir() / "settings.json"
-        explicit_mode = False
-        if config.exists():
-            try:
-                explicit_mode = "ocr_language_mode" in json.loads(config.read_text("utf-8"))
-            except (ValueError, OSError):
-                pass
-        if not explicit_mode or self.settings.ocr_language_mode == "single":
-            # Older settings had only one language. The new quick UI defaults to auto.
-            self.settings.ocr_version = "PP-OCRv5"
-            self.settings.ocr_language_mode = "auto"
-        # Automatic background sampling retains more of the source's appearance.
-        self.settings.fill_mode = "auto"
-        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        self.proxy = os.environ.get("SMART_OVERLAY_PROXY", "http://127.0.0.1:10809")
-        self.cloud_enabled = bool(self.api_key)
-        self.path = None
-        self.result: OneClickResult | None = None
-        self.worker = None
-        self.editor = None
+        try:
+            self.settings = load_settings()
+        except (ValueError, OSError):
+            self.settings = Settings()
+            self.statusBar().showMessage("Не удалось прочитать настройки; использованы значения по умолчанию")
+        self.path: Path | None = None
+        self.result: OneClickResult | PdfBatchResult | None = None
+        self.worker: ConvertWorker | None = None
+        self.editor: MainWindow | None = None
         self.setFont(QFont("Segoe UI", 10))
 
         root = QWidget()
@@ -201,116 +60,88 @@ class QuickWindow(QMainWindow):
         layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(12)
 
-        head = QHBoxLayout()
-        title_group = QVBoxLayout()
-        title = QLabel("Чертёж → PowerPoint")
+        title = QLabel("Живые чертежи → PowerPoint")
         title.setStyleSheet("font-size: 23px; font-weight: 600;")
-        subtitle = QLabel("Редактируемые надписи и таблицы. PDF: выбранные страницы → презентации по размеру листа.")
+        layout.addWidget(title)
+        subtitle = QLabel("Цифровые PDF с текстовым слоем. Редактируемые надписи и таблицы в PPTX.")
+        subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #777;")
-        title_group.addWidget(title)
-        title_group.addWidget(subtitle)
-        head.addLayout(title_group, 1)
-        self.config = QPushButton("Настройки")
-        self.config.clicked.connect(self.configure)
-        head.addWidget(self.config)
-        layout.addLayout(head)
+        layout.addWidget(subtitle)
 
         chooser = QHBoxLayout()
         self.file_label = QLabel("Чертёж не выбран")
+        self.file_label.setWordWrap(True)
         self.file_label.setStyleSheet("padding: 10px;")
         chooser.addWidget(self.file_label, 1)
-        self.pick = QPushButton("Выбрать чертёж")
+        self.pick = QPushButton("Выбрать PDF")
         self.pick.clicked.connect(self.choose)
         chooser.addWidget(self.pick)
-        self.run_button = QPushButton("Распознать → PPTX")
+        self.run_button = QPushButton("Создать PPTX")
         self.run_button.setMinimumHeight(43)
-        self.run_button.setEnabled(False)
         self.run_button.setStyleSheet("font-weight: 600; padding: 8px 18px;")
         self.run_button.clicked.connect(self.recognize)
         chooser.addWidget(self.run_button)
         layout.addLayout(chooser)
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Способ распознавания:"))
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Smart OCR · обычный", "smart")
-        self.mode_combo.addItem("Smart OCR · два распознавателя + VL", "hybrid_local")
-        self.mode_combo.addItem("Облако · весь чертёж (эксперимент)", "cloud_full")
-        self.mode_combo.addItem("Цифровой PDF · структура без OCR", "native_pdf")
-        self.mode_combo.addItem("PaddleOCR-VL 1.6 · целиком (эксперимент)", "vl_local")
-        engine_index = self.mode_combo.findData(self.settings.ocr_engine)
-        self.mode_combo.setCurrentIndex(max(0, engine_index))
-        self.mode_combo.currentIndexChanged.connect(self.mode_changed)
-        mode_row.addWidget(self.mode_combo)
-        self.device_combo = QComboBox()
-        self.device_combo.addItem("CPU", "cpu")
-        self.device_combo.addItem("GPU", "gpu:0")
-        self.device_combo.setCurrentIndex(0 if self.settings.vl_device == "cpu" else 1)
-        self.device_combo.setToolTip("GPU может потребовать более 6 ГБ видеопамяти. CPU медленнее.")
-        self.device_combo.currentIndexChanged.connect(self.device_changed)
-        mode_row.addWidget(self.device_combo)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
         pdf_row = QHBoxLayout()
         self.pdf_pages_label = QLabel("Обработать страницы:")
         self.pdf_pages_input = QLineEdit()
         self.pdf_pages_input.setMinimumWidth(200)
         self.pdf_pages_input.setPlaceholderText("Пусто = все; например: 1, 2, 6-9")
         self.pdf_pages_input.setToolTip("Страницы для обработки, независимо от страницы предпросмотра.")
+        self.pdf_pages_label.setBuddy(self.pdf_pages_input)
         pdf_row.addWidget(self.pdf_pages_label)
-        pdf_row.addWidget(self.pdf_pages_input,1)
+        pdf_row.addWidget(self.pdf_pages_input, 1)
         self.pdf_page_label = QLabel("Предпросмотр:")
         self.pdf_page = QSpinBox()
-        self.pdf_page.setRange(1,1)
-        self.pdf_page.setToolTip("Только предпросмотр. Страницы для обработки задаются отдельно; пусто = все.")
+        self.pdf_page.setRange(1, 1)
+        self.pdf_page.setToolTip("Только предпросмотр. Страницы для обработки задаются отдельно.")
         self.pdf_page.valueChanged.connect(self.preview_pdf_page)
+        self.pdf_page_label.setBuddy(self.pdf_page)
         pdf_row.addWidget(self.pdf_page_label)
         pdf_row.addWidget(self.pdf_page)
-        self.pdf_tables_combo = QComboBox()
-        self.pdf_tables_combo.addItem("С таблицами", True)
-        self.pdf_tables_combo.addItem("Без таблиц", False)
-        index = self.pdf_tables_combo.findData(self.settings.native_pdf_detect_tables)
-        self.pdf_tables_combo.setCurrentIndex(max(0,index))
-        self.pdf_tables_combo.setToolTip(
-            "С таблицами: восстанавливать ячейки и объединения. Без таблиц: "
-            "извлекать только текстовые блоки. В обоих режимах текст видим и редактируем.")
-        self.pdf_tables_combo.currentIndexChanged.connect(self.pdf_tables_changed)
-        pdf_row.addWidget(self.pdf_tables_combo)
+        layout.addLayout(pdf_row)
+
+        options = QWidget()
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setSpacing(4)
+        self.pdf_tables_checkbox = QCheckBox("Реконструировать таблицы")
+        self.pdf_tables_checkbox.setChecked(self.settings.native_pdf_detect_tables)
+        self.pdf_tables_checkbox.setToolTip(
+            "Восстанавливать редактируемые таблицы и объединения ячеек. "
+            "Без галочки программа извлекает только текстовые блоки.")
+        self.pdf_tables_checkbox.toggled.connect(self.save_pdf_options)
+        options_layout.addWidget(self.pdf_tables_checkbox)
         self.pdf_ignore_numbers_checkbox = QCheckBox("Игнорировать числа")
         self.pdf_ignore_numbers_checkbox.setChecked(self.settings.native_pdf_ignore_numbers)
         self.pdf_ignore_numbers_checkbox.setToolTip(
-            "Только цифровой PDF: игнорировать отдельные числовые надписи; "
-            "они останутся только на PNG, без редактируемого текста. "
-            "Ячейки таблиц всегда сохраняют все числа.")
-        self.pdf_ignore_numbers_checkbox.toggled.connect(self.pdf_ignore_numbers_changed)
-        pdf_row.addWidget(self.pdf_ignore_numbers_checkbox)
-        layout.addLayout(pdf_row)
-
-        language_row = QHBoxLayout()
-        language_row.addWidget(QLabel("Языки OCR:"))
-        self.language_button = QPushButton()
-        self.language_button.clicked.connect(self.choose_languages)
-        language_row.addWidget(self.language_button)
-        language_row.addStretch(1)
-        layout.addLayout(language_row)
-        self.refresh_languages()
-        self.mode_changed()
+            "Отдельные числовые надписи остаются только на PNG, без редактируемого текста. "
+            "В реконструированных таблицах все числа сохраняются.")
+        self.pdf_ignore_numbers_checkbox.toggled.connect(self.save_pdf_options)
+        options_layout.addWidget(self.pdf_ignore_numbers_checkbox)
+        self.pdf_split_lines_checkbox = QCheckBox("Не объединять строки")
+        self.pdf_split_lines_checkbox.setChecked(self.settings.native_pdf_split_lines)
+        self.pdf_split_lines_checkbox.setToolTip(
+            "Каждая строка вне реконструированных таблиц станет отдельным фреймом. "
+            "Содержимое ячеек не меняется.")
+        self.pdf_split_lines_checkbox.toggled.connect(self.save_pdf_options)
+        options_layout.addWidget(self.pdf_split_lines_checkbox)
+        layout.addWidget(options)
 
         self.preview = Preview()
         self.preview.show_formatting = True
         layout.addWidget(self.preview, 1)
 
         status = QHBoxLayout()
-        self.status_text = QLabel("Откройте изображение или цифровой PDF")
+        self.status_text = QLabel("Выберите PDF, из которого можно скопировать текст. Сканы не обрабатываются.")
         self.status_text.setWordWrap(True)
         status.addWidget(self.status_text, 1)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setMaximumWidth(160)
-        self.progress.hide()
         status.addWidget(self.progress)
         self.cancel = QPushButton("Отменить")
-        self.cancel.hide()
         self.cancel.clicked.connect(self.cancel_work)
         status.addWidget(self.cancel)
         layout.addLayout(status)
@@ -333,236 +164,80 @@ class QuickWindow(QMainWindow):
         self.review.hide()
         actions.addWidget(self.review)
         layout.addLayout(actions)
-        self.statusBar().showMessage("Готово к работе")
+        self.set_busy(False)
 
-    def mode_changed(self, *_):
-        engine = self.mode_combo.currentData()
-        local = engine in ("vl_local", "hybrid_local")
-        self.settings.ocr_engine = engine
-        self.language_button.setEnabled(engine not in ("vl_local", "cloud_full", "native_pdf") and self.worker is None)
-        self.device_combo.setEnabled(local and self.worker is None)
-        self.device_combo.setVisible(local)
-        pdf_selected = bool(self.path and self.path.suffix.lower() == ".pdf")
-        self.pdf_page_label.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_page.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_tables_combo.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_ignore_numbers_checkbox.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_pages_label.setVisible(engine == "native_pdf" and pdf_selected)
-        self.pdf_pages_input.setVisible(engine == "native_pdf" and pdf_selected)
-        for control in (self.pdf_tables_combo, self.pdf_ignore_numbers_checkbox, self.pdf_pages_input):
-            control.setEnabled(engine == "native_pdf" and pdf_selected and self.worker is None)
-        self.run_button.setText("Извлечь PDF → PPTX" if engine == "native_pdf"
-                                else "Распознать → PPTX")
-        if self.path and self.worker is None:
-            self.run_button.setEnabled((engine == "native_pdf") == pdf_selected)
-        self.statusBar().showMessage(
-            "Цифровой PDF: прямое извлечение текста и таблиц без OCR и без облака"
-            if engine == "native_pdf" else
-            "Полностью облачное OCR: модель читает изображение напрямую, запросы платные"
-            if engine == "cloud_full" else
-            "Гибрид: PP-OCRv5 + совместимые модели PP-OCRv6, затем пакетная VL-проверка; без облака"
-            if engine == "hybrid_local" else
-            "VL полностью локальный: экспериментальный режим для небольших листов"
-            if engine == "vl_local" else "Smart OCR готов")
-        self._save_mode()
-
-    def pdf_ignore_numbers_changed(self, checked):
-        self.settings.native_pdf_ignore_numbers = checked
-        self._save_mode()
-
-    def pdf_tables_changed(self, *_):
-        self.settings.native_pdf_detect_tables = self.pdf_tables_combo.currentData()
-        self._save_mode()
-
-    def device_changed(self, *_):
-        self.settings.vl_device = self.device_combo.currentData()
-        self._save_mode()
-
-    def _save_mode(self):
+    def save_pdf_options(self, _checked):
+        self.settings.native_pdf_detect_tables = self.pdf_tables_checkbox.isChecked()
+        self.settings.native_pdf_ignore_numbers = self.pdf_ignore_numbers_checkbox.isChecked()
+        self.settings.native_pdf_split_lines = self.pdf_split_lines_checkbox.isChecked()
         try:
             save_settings(self.settings)
         except OSError:
-            self.statusBar().showMessage("Не удалось сохранить настройки запуска")
+            self.statusBar().showMessage("Не удалось сохранить галочки для следующего запуска")
 
-    def refresh_languages(self):
-        if self.settings.ocr_language_mode != "manual":
-            label = "Автоопределение"
-        else:
-            codes = self.settings.ocr_languages
-            label = " + ".join(LANGUAGES[code][0] for code in codes if code in LANGUAGES)
-        self.language_button.setText(label + "  ▾")
-        self.language_button.setToolTip("Выбрать языковую пару или несколько языков OCR")
-
-    def choose_languages(self):
-        dialog = LanguageDialog(self.settings.ocr_language_mode, self.settings.ocr_languages, self)
-        if not dialog.exec():
+    def preview_pdf_page(self):
+        if self.path is None:
             return
-        mode, codes = dialog.selected()
-        previous = self.settings.model_copy(deep=True)
         try:
-            self.settings.ocr_version = "PP-OCRv5"
-            self.settings.ocr_language_mode = mode
-            self.settings.ocr_languages = codes
-            self.settings = type(self.settings).model_validate(self.settings.model_dump())
-            save_settings(self.settings)
-        except (ValueError, OSError) as exc:
-            self.settings = previous
-            QMessageBox.warning(self, "Языки OCR", str(exc))
-        self.refresh_languages()
-
-    def preview_pdf_page(self, *_):
-        if not self.path or self.path.suffix.lower() != ".pdf":
-            return
-        from .native_pdf import preview_pdf, NativePDFError
-        try:
-            project = preview_pdf(self.path,self.pdf_page.value())
-            self.preview.show_project(project,fit=True)
-        except (OSError,ValueError,NativePDFError) as exc:
-            QMessageBox.warning(self,"Страница PDF",str(exc))
+            self.preview.show_project(preview_pdf(self.path, self.pdf_page.value()), fit=True)
+        except (OSError, ValueError, NativePDFError) as exc:
+            QMessageBox.warning(self, "Страница PDF", str(exc))
 
     def choose(self):
         path, _ = QFileDialog.getOpenFileName(
-            self,"Выбрать чертёж",str(Path.home()),
-            "Чертежи и цифровые PDF (*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp)")
+            self, "Выбрать чертёж", str(Path.home()), "Цифровые чертежи (*.pdf)")
         if not path:
             return
-        selected=Path(path)
-        try:
-            if selected.suffix.lower() == ".pdf":
-                from .native_pdf import pdf_info, preview_pdf
-                details=pdf_info(path)
-                self.pdf_page.blockSignals(True)
-                self.pdf_page.setRange(1,details["pages"])
-                self.pdf_page.setValue(1)
-                self.pdf_page.blockSignals(False)
-                project=preview_pdf(path,1)
-            else:
-                project=load_image(path)
-                self.pdf_page.blockSignals(True)
-                self.pdf_page.setRange(1,1)
-                self.pdf_page.blockSignals(False)
-        except (OSError, ValueError, RuntimeError) as exc:
-            QMessageBox.warning(self,"Открытие файла",str(exc))
+        selected = Path(path)
+        if selected.suffix.lower() != ".pdf":
+            QMessageBox.warning(self, "Открытие файла", "Выберите цифровой PDF с текстовым слоем.")
             return
-        self.path=selected
+        try:
+            details = pdf_info(selected)
+            project = preview_pdf(selected, 1)
+        except (OSError, ValueError, NativePDFError) as exc:
+            QMessageBox.warning(self, "Открытие файла", str(exc))
+            return
+        with QSignalBlocker(self.pdf_page):
+            self.pdf_page.setRange(1, details["pages"])
+            self.pdf_page.setValue(1)
+        self.path = selected
         self.pdf_pages_input.clear()
         self.output_combo.clear()
         self.output_combo.hide()
-        if selected.suffix.lower()==".pdf":
-            native_index=self.mode_combo.findData("native_pdf")
-            self.mode_combo.setCurrentIndex(native_index)
-        elif self.mode_combo.currentData()=="native_pdf":
-            self.mode_combo.setCurrentIndex(self.mode_combo.findData("smart"))
-        self.mode_changed()
-        self.file_label.setText(str(self.path))
-        self.preview.show_project(project,fit=True)
-        self.result=None
+        self.file_label.setText(str(selected))
+        self.preview.show_project(project, fit=True)
+        self.result = None
         self.open_pptx.hide()
         self.review.hide()
-        self.summary.setText("")
-        self.run_button.setEnabled(True)
-        self.status_text.setText(
-            "Цифровой PDF: текст и таблицы будут извлечены напрямую; "
-            "исходные линии сохранятся на фоне"
-            if selected.suffix.lower()==".pdf" else "Можно распознавать")
-
-    def configure(self):
-        dialog = ConnectionDialog(self.settings, self.api_key, self.proxy, self.cloud_enabled, self)
-        if not dialog.exec():
-            return
-        self.api_key = dialog.key.text().strip()
-        self.proxy = dialog.proxy.text().strip()
-        self.cloud_enabled = dialog.cloud.isChecked()
-        self.settings.cloud_ocr_model = dialog.cloud_model.text().strip()
-        try:
-            self.settings = type(self.settings).model_validate(self.settings.model_dump())
-            save_settings(self.settings)
-        except (ValueError, OSError) as exc:
-            QMessageBox.warning(self, "Настройки", str(exc))
-        self.status_text.setText("Параметры сохранены. Ключ хранится только в памяти приложения.")
+        self.summary.clear()
+        self.statusBar().clearMessage()
+        self.set_busy(False)
+        self.status_text.setText("Презентации будут сохранены рядом с PDF, отдельно для каждого размера листа.")
 
     def recognize(self):
-        if not self.path or self.worker:
+        source = self.path
+        if source is None or source.suffix.lower() != ".pdf" or self.worker:
             return
-        consent = False
-        engine = self.mode_combo.currentData()
-        pages_spec = self.pdf_pages_input.text()
-        if engine == "native_pdf":
-            from .pdf_pages import parse_pdf_pages
-            try:
-                parse_pdf_pages(pages_spec, self.pdf_page.maximum())
-            except ValueError as exc:
-                QMessageBox.warning(self, "Страницы PDF",
-                                    f"Неверный выбор {pages_spec!r}: {exc}\n"
-                                    "Укажите 1, 2, 6-9 или оставьте поле пустым для всех страниц.")
-                return
-        local_vl = engine == "vl_local"
-        if engine == "cloud_full":
-            if not self.api_key:
-                QMessageBox.warning(
-                    self, "Облачное OCR",
-                    "Для полного облачного распознавания введите API-ключ в «Настройки».")
-                return
-            from .cloud_ocr import balanced_cloud_tiles, CloudOCRError
-            try:
-                source_info = load_image(self.path).source
-                plan = balanced_cloud_tiles(
-                    source_info.width, source_info.height,
-                    size=self.settings.cloud_ocr_tile_size,
-                    overlap=self.settings.cloud_ocr_overlap,
-                    max_tiles=self.settings.cloud_ocr_max_requests)
-            except (OSError, ValueError, CloudOCRError) as exc:
-                QMessageBox.warning(self, "План облачного OCR", str(exc))
-                return
-            answer = QMessageBox.question(
-                self, "Подтверждение платного облачного OCR",
-                f"Отправить исходный чертёж в OpenRouter для полного распознавания?\n"
-                f"Модель: {self.settings.cloud_ocr_model}\n"
-                f"План: {len(plan)} запросов; области до "
-                f"{self.settings.cloud_ocr_tile_size} пикселей, "
-                f"перекрытие ~{self.settings.cloud_ocr_overlap} пикселей.\n"
-                f"Лимит ответа: {self.settings.cloud_ocr_max_tokens} токенов на запрос.\n"
-                "Запросы могут быть платными. После отправки оплата возможна даже при отмене.\n"
-                "Автоматических повторов нет; локальный OCR не используется.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            consent = True
-        elif self.cloud_enabled and engine == "smart":
-            answer = QMessageBox.question(
-                self, "Облачное распознавание",
-                "Отправить части этого чертежа и распознанный текст в OpenRouter через настроенный VPN?\n"
-                "Модель Qwen3-VL-8B, провайдер Parasail. Запросы могут быть платными.\n"
-                "Нет — создать PPTX полностью локально.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Yes)
-            if answer == QMessageBox.StandardButton.Cancel:
-                return
-            consent = answer == QMessageBox.StandardButton.Yes
+        from .pdf_batch import convert_pdf_pages
 
-        source, settings, key, proxy = self.path, self.settings.model_copy(deep=True), self.api_key, self.proxy
-        pdf_page = self.pdf_page.value()
-        device = self.device_combo.currentData()
-        diagnostics = (data_dir() / "diagnostics" /
-                       ("cloud-full" if engine == "cloud_full" else
-                        "paddle-vl-hybrid" if engine == "hybrid_local" else "paddle-vl")
-                       / (self.path.stem + "-" + uuid4().hex[:8])
-                       if engine in ("vl_local", "hybrid_local", "cloud_full") else None)
+        pages_spec = self.pdf_pages_input.text()
+        try:
+            parse_pdf_pages(pages_spec, self.pdf_page.maximum())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Страницы PDF",
+                                f"Неверный выбор {pages_spec!r}: {exc}\n"
+                                "Укажите 1, 2, 6-9 или оставьте поле пустым для всех страниц.")
+            return
+        settings = self.settings.model_copy(deep=True)
         self.set_busy(True)
-        self.summary.setText("")
-        self.status_text.setText("Начинаю распознавание…")
-        if engine == "native_pdf":
-            from .pdf_batch import convert_pdf_pages
-            work = lambda report, stop: convert_pdf_pages(
-                source, pages=pages_spec, settings=settings, progress=report, cancelled=stop)
-        else:
-            work = lambda report, stop: convert_drawing(source, settings=settings, api_key=key,
-                                                 consent=consent, proxy=proxy,
-                                                 ocr_engine=engine, vl_device=device,
-                                                 vl_diagnostics=diagnostics,
-                                                 pdf_page=pdf_page,
-                                                 progress=report, cancelled=stop)
+        self.summary.clear()
+        self.status_text.setText("Начинаю обработку PDF…")
+
+        def work(report, stop):
+            return convert_pdf_pages(source, pages=pages_spec, settings=settings,
+                                     progress=report, cancelled=stop)
+
         self.worker = ConvertWorker(work, self)
         self.worker.progress.connect(self.status_text.setText)
         self.worker.completed.connect(self.done)
@@ -572,38 +247,27 @@ class QuickWindow(QMainWindow):
         self.worker.start()
 
     def set_busy(self, busy):
-        for widget in (self.pick, self.run_button, self.config,
-                       self.language_button, self.mode_combo, self.device_combo,
-                       self.pdf_page):
+        for widget in (self.pick, self.pdf_tables_checkbox, self.pdf_ignore_numbers_checkbox,
+                       self.pdf_split_lines_checkbox,
+                       self.open_pptx, self.output_combo):
             widget.setEnabled(not busy)
-        native_pdf = (self.mode_combo.currentData() == "native_pdf"
-                      and bool(self.path and self.path.suffix.lower() == ".pdf"))
-        for control in (self.pdf_tables_combo, self.pdf_ignore_numbers_checkbox, self.pdf_pages_input):
-            control.setEnabled(not busy and native_pdf)
+        has_pdf = self.path is not None and self.path.suffix.lower() == ".pdf"
+        for widget in (self.run_button, self.pdf_page, self.pdf_pages_input):
+            widget.setEnabled(not busy and has_pdf)
         self.progress.setVisible(busy)
         self.cancel.setVisible(busy)
-        self.open_pptx.setEnabled(not busy)
-        self.output_combo.setEnabled(not busy)
-        self.review.setEnabled(not busy and not hasattr(self.result, "groups"))
+        self.review.setEnabled(not busy and isinstance(self.result, OneClickResult))
 
     def cancel_work(self):
         if self.worker:
             self.worker.requestInterruption()
-            self.status_text.setText("Останавливаю отдельный процесс VL…")
+            self.status_text.setText("Отменяю обработку PDF…")
             self.cancel.setEnabled(False)
 
     def done(self, result):
-        # A one-page selection still uses the existing single-project editor.
-        if (hasattr(result,"groups") and len(result.selected_pages)==1
-                and len(result.groups)==1):
-            group=result.groups[0]
-            self.done(OneClickResult(project=open_project(group.project_files[0]),
-                                     pptx=group.pptx,project_file=group.project_files[0],
-                                     warnings=result.warnings))
-            return
-        self.result = result
         self.output_combo.clear()
-        if hasattr(result, "groups"):
+        if len(result.selected_pages) != 1:
+            self.result = result
             for group in result.groups:
                 self.output_combo.addItem(
                     f"{group.pptx.name} · страницы {', '.join(map(str, group.pages))}", group.pptx)
@@ -615,46 +279,40 @@ class QuickWindow(QMainWindow):
                 self.preview.show_project(open_project(result.groups[0].project_files[0]))
             notes = [f"Готово: {len(result.selected_pages)} страниц; на проверку: {result.needs_review}."]
             notes.extend(str(group.pptx) for group in result.groups[:2])
-            if len(result.groups)>2:
-                notes.append(f"Ещё файлов: {len(result.groups)-2}; все доступны в списке.")
+            if len(result.groups) > 2:
+                notes.append(f"Ещё файлов: {len(result.groups) - 2}; все доступны в списке.")
             notes.extend(result.warnings[:2])
-            if len(result.warnings)>2:
-                notes.append(f"Других замечаний: {len(result.warnings)-2}; подробности в проектах страниц.")
-            notes.append("Предпросмотр: первая страница первой группы. Редактор проектов не редактирует всю презентацию.")
+            if len(result.warnings) > 2:
+                notes.append(f"Других замечаний: {len(result.warnings) - 2}; подробности в проектах страниц.")
+            notes.append("Предпросмотр: первая страница первой презентации.")
             self.summary.setText("\n".join(notes))
             self.status_text.setText("PowerPoint создан: выберите файл для открытия")
             return
+
+        group = result.groups[0]
+        single = OneClickResult(project=open_project(group.project_files[0]), pptx=group.pptx,
+                                project_file=group.project_files[0], warnings=result.warnings)
+        self.result = single
         self.output_combo.hide()
-        self.preview.show_project(result.project)
+        self.preview.show_project(single.project)
         self.open_pptx.show()
         self.review.show()
-        notes = [f"Готово: {result.pptx.name}",
-                 f"Объектов: {len(result.project.objects)}; на проверку: {result.needs_review}."]
-        if result.project.source.mode == "PDF":
-            overlay_mode = result.project.raw.get("native_pdf",{}).get("overlay_mode")
-            if overlay_mode == "editable":
-                notes.append("Видимый редактируемый текст; исходные надписи закрыты "
-                             "заливкой самих фреймов и ячеек.")
-            elif overlay_mode == "source_exact":
-                notes.append("Точный оригинал: редактируемый текст невидим. "
-                             "Для видимого перевода требуется экспорт «как OCR».")
-            detected=result.project.raw.get("native_pdf",{}).get("source_fonts",[])
-            installed={re.sub(r"[^a-z0-9]","",family.lower())
-                       for family in QFontDatabase.families()}
-            missing=[family for family in detected
-                     if re.sub(r"[^a-z0-9]","",family.lower()) not in installed]
-            if missing:
-                notes.append("Для точного совпадения шрифтов установите "
-                             "их лицензированные версии в Windows: "+
-                             ", ".join(missing[:4])+
-                             ". Без них PowerPoint подставляет другой шрифт.")
-        if result.warnings:
-            notes.append("Замечания: " + "; ".join(result.warnings[:2]))
-            if len(result.warnings) > 2:
-                notes.append(f"И ещё {len(result.warnings) - 2}.")
+        self.review.setEnabled(self.worker is None)
+        notes = [f"Готово: {single.pptx.name}",
+                 f"Объектов: {len(single.project.objects)}; на проверку: {single.needs_review}.",
+                 "Видимый редактируемый текст; исходные надписи закрыты заливкой фреймов и ячеек."]
+        detected = single.project.raw.get("native_pdf", {}).get("source_fonts", [])
+        installed = {re.sub(r"[^a-z0-9]", "", family.lower()) for family in QFontDatabase.families()}
+        missing = [family for family in detected if re.sub(r"[^a-z0-9]", "", family.lower()) not in installed]
+        if missing:
+            notes.append("Без исходных шрифтов PowerPoint может подставить другие: " + ", ".join(missing[:4]) + ".")
+        if single.warnings:
+            notes.append("Замечания: " + "; ".join(single.warnings[:2]))
+            if len(single.warnings) > 2:
+                notes.append(f"И ещё {len(single.warnings) - 2}.")
         self.summary.setText(" ".join(notes))
         self.status_text.setText("PowerPoint создан")
-        self.statusBar().showMessage(str(result.pptx))
+        self.statusBar().showMessage(str(single.pptx))
 
     def failed(self, reason):
         QMessageBox.warning(self, "Не удалось создать PPTX", reason)
@@ -668,31 +326,30 @@ class QuickWindow(QMainWindow):
         self.worker = None
         self.set_busy(False)
         self.cancel.setEnabled(True)
-        self.mode_changed()
         if worker:
             worker.deleteLater()
 
     def open_result(self):
         if self.result:
-            path = self.output_combo.currentData() if hasattr(self.result, "groups") else self.result.pptx
+            path = self.result.pptx if isinstance(self.result, OneClickResult) else self.output_combo.currentData()
             if path:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def open_editor(self):
-        if not self.result or hasattr(self.result, "groups"):
+        if not isinstance(self.result, OneClickResult):
             return
-        from .app import MainWindow
-        self.editor = MainWindow()
+        if self.editor and self.editor.isVisible() and not self.editor.close():
+            return
+        self.editor = MainWindow(native_only=True)
         self.editor.project = self.result.project.model_copy(deep=True)
-        self.editor.project_path = (str(self.result.project_file)
-                                   if self.result.project_file.exists() else None)
-        self.editor.dirty = False
+        self.editor.settings = Settings.model_validate(self.editor.project.settings)
+        self.editor.project_path = str(self.result.project_file) if self.result.project_file.exists() else None
         self.editor.refresh(fit=True)
         self.editor.show()
 
     def closeEvent(self, event):
         if self.worker:
-            QMessageBox.information(self, "Распознавание", "Сначала отмените текущую обработку.")
+            QMessageBox.information(self, "Обработка PDF", "Сначала отмените текущую обработку.")
             event.ignore()
         else:
             event.accept()

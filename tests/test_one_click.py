@@ -123,10 +123,10 @@ def test_quick_window_shows_primary_actions(gui_app, monkeypatch):
     monkeypatch.setattr("smart_overlay.quick_app.load_settings", lambda: Settings())
     window = QuickWindow()
     try:
-        assert window.run_button.text() == "Распознать → PPTX"
+        assert window.run_button.text() == "Создать PPTX"
         assert not window.run_button.isEnabled()
-        assert not window.open_pptx.isVisible()
-        assert not window.review.isVisible()
+        assert window.open_pptx.isHidden()
+        assert window.review.isHidden()
     finally:
         window.close()
         window.deleteLater()
